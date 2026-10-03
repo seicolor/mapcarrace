@@ -264,7 +264,7 @@ class Game {
     for (const c of this.cars) c.model.paint.envMapIntensity = this.T.night > 0.5 ? 3.2 : 1.3;
     this.buildPads();
     this.buildMinimapBase();
-    this.cacheCourseStats();
+    this.cacheCourseStats(); this.poiSeen = new Set();
     this.gridCars(); this.raceTime = 0;
     this.headlights.forEach(h => h.intensity = 0);
     this.camYaw = player.heading;
@@ -311,6 +311,8 @@ class Game {
     g.strokeStyle = 'rgba(0,0,0,0.85)'; g.lineWidth = 27 * S; path(); g.stroke();
     g.strokeStyle = '#ffffff'; g.lineWidth = 21 * S; path(); g.stroke();
     g.strokeStyle = '#18e0ff'; g.lineWidth = 15 * S; path(); g.stroke();
+    g.fillStyle = '#ffd23f'; g.strokeStyle = '#000'; g.lineWidth = 5 * S;
+    for (const l of (this.world ? this.world.landmarks : [])) { const q = P([l.x, l.z]); const r = 26 * S; g.beginPath(); g.moveTo(q[0], q[1] - r); g.lineTo(q[0] + r * 0.7, q[1]); g.lineTo(q[0], q[1] + r); g.lineTo(q[0] - r * 0.7, q[1]); g.closePath(); g.stroke(); g.fill(); }
     // スタートマーク
     const s0 = P(c.pts[0]); g.fillStyle = '#ff2d7a'; g.beginPath(); g.arc(s0[0], s0[1], 17 * S, 0, 7); g.fill(); g.fillStyle = '#fff'; g.beginPath(); g.arc(s0[0], s0[1], 8 * S, 0, 7); g.fill();
     this.mmCanvas = cv;
@@ -474,6 +476,7 @@ class Game {
       }
     }
     if (this.state === 'finished' && this.raceTime - this.player.finishTime > 3.2 && $('results').classList.contains('hidden') && !this.resultsShown) this.showResults();
+    for (const l of this.world.landmarks) { if (this.poiSeen.has(l.name)) continue; if (Math.hypot(player.x - l.x, player.z - l.z) < 90) { this.poiSeen.add(l.name); const e = $('poi'); e.textContent = '◆ ' + l.name; e.classList.remove('show'); void e.offsetWidth; e.classList.add('show'); } }
     // ワンウェイ検出
     const p = this.player; const tIdx = p.idx; const dir = Math.cos(p.heading) * this.course.tx[tIdx] + Math.sin(p.heading) * this.course.tz[tIdx];
     if (dir < -0.35 && p.speed > 4) p.wrongWay += dt; else p.wrongWay = Math.max(0, p.wrongWay - dt * 2);

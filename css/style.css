@@ -94,3 +94,6 @@ input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(24,2
 #touch .gas{background:rgba(255,45,122,.4)}
 
 @media(pointer:coarse){#hud-br{right:auto;left:50%;transform:translateX(-50%);bottom:0}#gauge{width:210px}#hud-bc{bottom:128px}#touch .tr{grid-template-columns:70px 70px}#touch button{width:70px;height:70px}}
+
+#poi{position:absolute;left:20px;top:150px;padding:8px 16px;border-radius:12px;background:rgba(8,12,26,.72);border-left:4px solid #ffd23f;font-family:"Noto Sans JP",sans-serif;font-weight:700;font-size:16px;opacity:0}
+#poi.show{animation:poi 4s ease-out forwards}@keyframes poi{0%{opacity:0;transform:translateX(-20px)}8%{opacity:1;transform:none}80%{opacity:1}100%{opacity:0}}

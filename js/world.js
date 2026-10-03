@@ -149,6 +149,7 @@ export class World {
     this.makeGantries();
     this.makeBuildings();
     this.makeProps();
+    this.makeLandmarks();
     this.makeSkyline();
     this.applyTheme();
   }
@@ -629,6 +630,34 @@ export class World {
       const im = new THREE.InstancedMesh(treeGeo, treeMat, trees.length); const dd = new THREE.Object3D(); const cc = new THREE.Color();
       trees.forEach((t, q) => { dd.position.set(t[0], 0, t[1]); dd.rotation.set(0, rnd() * 6, 0); dd.scale.setScalar(t[2]); dd.updateMatrix(); im.setMatrixAt(q, dd.matrix); cc.setHSL(0.24 + rnd() * 0.07, 0.45 + rnd() * 0.2, 0.7 + rnd() * 0.5); im.setColorAt(q, cc); });
       im.castShadow = true; im.receiveShadow = true; this.root.add(im);
+    }
+  }
+
+  // ---------------- ランドマーク ----------------
+  makeLandmarks() {
+    const c = this.course; this.landmarks = [];
+    if (this.data.demo) { this.data.landmarks.forEach((l, k) => { const i = Math.floor(c.n * (0.1 + 0.19 * k)) % c.n; const side = k % 2 ? -1 : 1; l.x = c.pts[i][0] + -c.tz[i] * side * 70; l.z = c.pts[i][1] + c.tx[i] * side * 70; }); }
+    const list = (this.data.landmarks || []).filter(l => c.farDist(l.x, l.z) < 260).sort((a, b) => c.farDist(a.x, a.z) - c.farDist(b.x, b.z)).slice(0, 14);
+    const beamGeo = new THREE.CylinderGeometry(1.1, 1.1, 130, 12, 1, true).translate(0, 65, 0);
+    const bc = new Float32Array(beamGeo.getAttribute('position').count * 3);
+    for (let i = 0; i < bc.length / 3; i++) { const y = beamGeo.getAttribute('position').getY(i) / 130; const v = 0.55 * (1 - y); bc[i * 3] = v * 0.25; bc[i * 3 + 1] = v * 0.9; bc[i * 3 + 2] = v; }
+    beamGeo.setAttribute('color', new THREE.BufferAttribute(bc, 3));
+    const beamMat = new THREE.MeshBasicMaterial({ vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, side: THREE.DoubleSide, toneMapped: false, fog: false });
+    const ringGeo = new THREE.RingGeometry(3, 4.2, 32).rotateX(-Math.PI / 2);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x18e0ff, transparent: true, opacity: 0.8, toneMapped: false, depthWrite: false });
+    for (const l of list) {
+      const g = new THREE.Group(); g.position.set(l.x, 0, l.z);
+      const beam = new THREE.Mesh(beamGeo, beamMat); g.add(beam);
+      const ring = new THREE.Mesh(ringGeo, ringMat); ring.position.y = 0.3; g.add(ring);
+      const cv = document.createElement('canvas'); cv.width = 512; cv.height = 112; const x = cv.getContext('2d');
+      x.fillStyle = 'rgba(8,14,32,0.82)'; x.beginPath(); x.roundRect(4, 8, 504, 96, 48); x.fill(); x.strokeStyle = '#18e0ff'; x.lineWidth = 4; x.stroke();
+      x.fillStyle = '#ff2d7a'; x.beginPath(); x.moveTo(52, 28); x.lineTo(72, 56); x.lineTo(52, 84); x.lineTo(32, 56); x.closePath(); x.fill();
+      x.fillStyle = '#fff'; x.font = '700 44px "Noto Sans JP", "Hiragino Sans", sans-serif'; x.textAlign = 'left'; x.textBaseline = 'middle';
+      let name = l.name; if (name.length > 14) name = name.slice(0, 13) + '…'; x.fillText(name, 92, 58, 400);
+      const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false, fog: false }));
+      sp.scale.set(66, 14.4, 1); sp.position.y = 80; sp.renderOrder = 8; g.add(sp);
+      this.root.add(g); this.landmarks.push(l);
     }
   }
 

@@ -40,6 +40,10 @@ URL パラメータでも指定できます: `?lat=35.6595&lon=139.7005&name=渋
 
 地図データ © OpenStreetMap contributors
 
+## ランドマーク
+
+OpenStreetMap の観光名所・史跡・塔・大聖堂・スタジアムなどを検出し、コース近くのものにビーコンと名前ラベルを立て、ミニマップに◆で表示します。近くを通ると名前が表示されます。
+
 ## GitHub Pages で公開する
 
 リポジトリの **Settings → Pages → Build and deployment → Source** を **GitHub Actions** にすると、`main` ブランチへの push のたびに `.github/workflows/pages.yml` が `index.html` / `css` / `js` / `vendor` を公開します。公開URLは `https://<ユーザー名>.github.io/<リポジトリ名>/` です。

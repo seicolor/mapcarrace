@@ -53,6 +53,10 @@ function buildQuery(lat, lon, rRoad, rBld) {
   way["natural"~"^(wood|scrub|grassland)$"]${a(rRoad)};
   rel["natural"="water"]${a(rRoad)};
   rel["leisure"="park"]${a(rRoad)};
+  nwr["name"]["tourism"~"^(attraction|museum|viewpoint|gallery|zoo|theme_park)$"]${a(rRoad)};
+  nwr["name"]["historic"~"^(castle|monument|memorial|ruins|archaeological_site|shrine|temple|tower|city_gate)$"]${a(rRoad)};
+  nwr["name"]["man_made"~"^(tower|lighthouse|obelisk)$"]${a(rRoad)};
+  nwr["name"]["building"~"^(cathedral|temple|shrine|stadium|train_station)$"]${a(rRoad)};
 );
 out geom tags;`;
 }
@@ -127,10 +131,21 @@ function joinRings(segs) {
 
 export function parseOverpass(json, lat0, lon0, radius) {
   const proj = makeProjector(lat0, lon0);
-  const data = { roads: [], buildings: [], water: [], parks: [], radius, name: '' };
+  const data = { roads: [], buildings: [], water: [], parks: [], landmarks: [], radius, name: '' };
   const toPts = (geom) => geom.map(g => proj(g.lat, g.lon));
+  const isLandmark = (t) => t.name && (/^(attraction|museum|viewpoint|gallery|zoo|theme_park)$/.test(t.tourism || '') || /^(castle|monument|memorial|ruins|archaeological_site|shrine|temple|tower|city_gate)$/.test(t.historic || '') || /^(tower|lighthouse|obelisk)$/.test(t.man_made || '') || /^(cathedral|temple|shrine|stadium|train_station)$/.test(t.building || ''));
+  const centerOf = (el) => {
+    if (el.type === 'node') return proj(el.lat, el.lon);
+    let g = el.geometry; if (!g && el.members) { g = []; for (const m of el.members) if (m.geometry) g = g.concat(m.geometry); }
+    if (!g || !g.length) return null; let a = 0, b = 0; for (const q of g) { a += q.lat; b += q.lon; } return proj(a / g.length, b / g.length);
+  };
   for (const el of json.elements) {
     const t = el.tags || {};
+    if (isLandmark(t)) {
+      const c = centerOf(el);
+      if (c && Math.hypot(c[0], c[1]) < radius && !data.landmarks.some(l => l.name === t.name && Math.hypot(l.x - c[0], l.z - c[1]) < 150))
+        data.landmarks.push({ name: t['name:ja'] || t.name, x: c[0], z: c[1] });
+    }
     if (el.type === 'way' && el.geometry && el.geometry.length > 1) {
       if (t.highway && DRIVABLE.has(t.highway)) {
         if (t.area === 'yes') continue;
@@ -149,7 +164,7 @@ export function parseOverpass(json, lat0, lon0, radius) {
       } else if (t.leisure || t.landuse || t.natural) {
         const pts = toPts(el.geometry); if (ringOK(pts)) data.parks.push(pts.slice(0, -1));
       }
-    } else if (el.type === 'relation' && el.members) {
+    } else if (el.type === 'relation' && el.members && (t.natural === 'water' || t.leisure === 'park')) {
       const segs = [];
       for (const m of el.members) if (m.role === 'outer' && m.geometry) segs.push(m.geometry.map(g => [g.lat, g.lon]));
       const rings = joinRings(segs);
@@ -253,7 +268,8 @@ export function generateDemoCity(seed = 7) {
       }
     }
   }
-  return { roads, buildings, water, parks, radius: 1000, name: 'デモ都市（オフライン）', demo: true, lat: 0, lon: 0 };
+  const landmarks = [{ name: 'シティタワー', x: 250, z: -120 }, { name: 'セントラル駅', x: -180, z: 160 }, { name: 'サンセット公園', x: 60, z: 300 }, { name: 'ベイブリッジ展望台', x: -320, z: -240 }, { name: 'スカイアリーナ', x: 380, z: 210 }];
+  return { roads, buildings, water, parks, landmarks, radius: 1000, name: 'デモ都市（オフライン）', demo: true, lat: 0, lon: 0 };
 }
 
 export const PRESETS = [
