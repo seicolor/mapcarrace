@@ -15,7 +15,7 @@ export function mulberry32(a) {
 
 const COST = { motorway: 1.1, trunk: 1.0, primary: 0.85, secondary: 0.8, tertiary: 0.85, unclassified: 1, residential: 1, living_street: 1.6, service: 3, road: 1.2 };
 
-export function buildGraph(roads) {
+export function buildGraph(roads, allowService = false) {
   const idx = new Map(); const nodes = []; const adj = [];
   const getNode = (key, p) => {
     let i = idx.get(key);
@@ -25,6 +25,7 @@ export function buildGraph(roads) {
   let eid = 0;
   for (const r of roads) {
     if (r.tunnel) continue;
+    if (!allowService && (r.type === 'service' || r.type === 'living_street' && !r.name)) continue;
     const base = r.type.replace('_link', '');
     const cf = (COST[base] ?? 1) * (r.type.endsWith('_link') ? 1.5 : 1);
     for (let k = 0; k + 1 < r.pts.length; k++) {
@@ -307,7 +308,9 @@ export function makeCourse(loopPts, halfWidth = 7.5) {
 }
 
 export function generateCourse(data, { lengthTarget = 2500, seed = 1 } = {}) {
-  const g = buildGraph(data.roads);
+  let g = buildGraph(data.roads);
+  const mainSize = (gg) => { let c = 0; for (let i = 0; i < gg.nodes.length; i++) if (gg.comp[i] === gg.main) c++; return c; };
+  if (mainSize(g) < 120) g = buildGraph(data.roads, true);
   const best = findLoop(g, { target: lengthTarget, seed, cx: 0, cz: 0 });
   if (!best) return null;
   const pts = best.nodePath.map(i => [g.nodes[i].x, g.nodes[i].z]);

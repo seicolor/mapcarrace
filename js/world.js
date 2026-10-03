@@ -31,7 +31,7 @@ export const THEMES = {
 
 function canvasTex(w, h, draw, { repeat = false, srgb = true, aniso = 8 } = {}) {
   const c = document.createElement('canvas'); c.width = w; c.height = h;
-  const g = c.getContext('2d'); draw(g, w, h);
+  const g = c.getContext('2d', { willReadFrequently: true }); draw(g, w, h);
   const t = new THREE.CanvasTexture(c);
   if (srgb) t.colorSpace = THREE.SRGBColorSpace;
   if (repeat) t.wrapS = t.wrapT = THREE.RepeatWrapping;
@@ -479,7 +479,7 @@ export class World {
     };
     for (const b of all) {
       let cx = 0, cz = 0; for (const p of b.pts) { cx += p[0]; cz += p[1]; } cx /= b.pts.length; cz /= b.pts.length;
-      if (c.distToCourse(cx, cz, 300) > 280) continue;
+      b.cd = c.distToCourse(cx, cz, 300); if (b.cd > 280) continue;
       // コース上に被る建物を除外
       let bad = false;
       for (let i = 0; i < b.pts.length && !bad; i++) {
@@ -488,6 +488,7 @@ export class World {
       }
       if (!bad) kept.push(b);
     }
+    if (kept.length > 9000) { kept.sort((a, b) => a.cd - b.cd); kept.length = 9000; }
     this.buildings = kept; kept.forEach((b, i) => addGrid(b, i));
     // 内部にコースが通る建物
     const dead = new Set();

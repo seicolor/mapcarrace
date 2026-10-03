@@ -29,6 +29,7 @@ const FinalShader = {
     void main(){
       vec2 c = vUv - vec2(0.5, 0.46); float r = length(c * vec2(uAspect, 1.0));
       float amt = uBlur * smoothstep(0.12, 0.75, r);
+      if (uBlur < 0.015) { vec3 c0 = texture2D(tDiffuse, vUv).rgb; c0 *= 1.0 - uVig * smoothstep(0.35, 1.05, r * 1.15); c0 += (hash(vUv * 1000.0 + uTime) - 0.5) * 0.012; gl_FragColor = vec4(c0, 1.0); return; }
       vec3 col = vec3(0.0); float wsum = 0.0;
       for (int i = 0; i < 9; i++) {
         float t = float(i) / 8.0; vec2 o = c * amt * 0.22 * t;
