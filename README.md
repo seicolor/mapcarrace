@@ -39,3 +39,7 @@ URL パラメータでも指定できます: `?lat=35.6595&lon=139.7005&name=渋
 - 外部アセット不要（音もすべて WebAudio 合成）。three.js は `vendor/` に同梱。
 
 地図データ © OpenStreetMap contributors
+
+## GitHub Pages で公開する
+
+リポジトリの **Settings → Pages → Build and deployment → Source** を **GitHub Actions** にすると、`main` ブランチへの push のたびに `.github/workflows/pages.yml` が `index.html` / `css` / `js` / `vendor` を公開します。公開URLは `https://<ユーザー名>.github.io/<リポジトリ名>/` です。
