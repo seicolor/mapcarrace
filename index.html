@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>MAP CAR RACE — 世界中どこでもサーキット</title>
+<meta name="description" content="好きな場所を指定すると、その街の本物の道路でレースコースを自動生成。three.js 製3Dカーレース。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%23070a14%27/%3E%3Cpath d=%27M10 40 L22 22 H42 L54 40 Z%27 fill=%27%2318e0ff%27/%3E%3Ccircle cx=%2720%27 cy=%2742%27 r=%276%27 fill=%27%23ff2d7a%27/%3E%3Ccircle cx=%2744%27 cy=%2742%27 r=%276%27 fill=%27%23ff2d7a%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <div id="hud-tl">
+    <div class="card pos"><span class="lbl">POS</span><b id="h-pos">1</b><span class="of">/ <span id="h-cars">6</span></span></div>
+    <div class="card lap"><span class="lbl">LAP</span><b id="h-lap">1</b><span class="of">/ <span id="h-laps">3</span></span></div>
+  </div>
+  <div id="hud-tc">
+    <div id="h-time">0:00.000</div>
+    <div id="h-sub"><span>LAST <b id="h-last">--:--.---</b></span><span>BEST <b id="h-best">--:--.---</b></span></div>
+  </div>
+  <div id="hud-tr"><canvas id="minimap" width="400" height="400"></canvas><div id="h-place"></div></div>
+  <div id="hud-br">
+    <canvas id="gauge" width="520" height="360"></canvas>
+  </div>
+  <div id="hud-bc"><div id="nitro"><div id="nitro-fill"></div><span>NITRO</span></div></div>
+  <div id="msg"></div>
+  <div id="wrong" class="hidden">⚠ 逆走 WRONG WAY</div>
+  <div id="hint">W/↑ アクセル　S/↓ ブレーキ　A D/←→ ハンドル　<b>Space</b> ドリフト　<b>Shift</b> ニトロ　<b>C</b> カメラ　<b>R</b> コース復帰　<b>M</b> 音</div>
+</div>
+
+<!-- メニュー -->
+<div id="menu" class="screen">
+  <div class="panel">
+    <div class="logo"><span class="l1">MAP</span><span class="l2">CAR RACE</span></div>
+    <p class="tagline">世界中のどこでもサーキットに。<br>地図の場所を指定すると、その街の<b>本物の道路</b>でコースを自動生成します。</p>
+
+    <div class="field">
+      <label>場所を検索</label>
+      <div class="row"><input id="q" type="text" placeholder="例: 渋谷駅 / Monaco / 金閣寺 / Brooklyn Bridge" autocomplete="off"><button id="btn-search" class="btn sm">検索</button><button id="btn-geo" class="btn sm ghost" title="現在地">📍</button></div>
+      <div id="results-list"></div>
+    </div>
+    <div class="field">
+      <label>おすすめスポット</label>
+      <div id="presets" class="chips"></div>
+    </div>
+    <div class="grid3">
+      <div class="field"><label>コース長</label><div class="seg" data-key="len"><button data-v="1500">ショート<small>1.5km</small></button><button data-v="2500" class="on">ミディアム<small>2.5km</small></button><button data-v="4000">ロング<small>4km</small></button></div></div>
+      <div class="field"><label>時間帯</label><div class="seg" data-key="theme"><button data-v="day" class="on">☀ 昼</button><button data-v="sunset">🌇 夕方</button><button data-v="night">🌙 夜</button></div></div>
+      <div class="field"><label>周回 / ライバル</label><div class="seg" data-key="laps"><button data-v="2">2周</button><button data-v="3" class="on">3周</button><button data-v="5">5周</button></div><div class="seg" data-key="rivals" style="margin-top:6px"><button data-v="3">3台</button><button data-v="5" class="on">5台</button><button data-v="7">7台</button></div></div>
+    </div>
+    <div id="chosen">場所を選んでください</div>
+    <button id="btn-go" class="btn big" disabled>コースを生成してレース</button>
+    <div class="foot">地図データ © OpenStreetMap contributors ／ 操作: キーボード・ゲームパッド・タッチ対応</div>
+  </div>
+</div>
+
+<!-- ローディング -->
+<div id="loading" class="screen hidden">
+  <div class="loader"><div class="ring"></div><div id="load-title">コース生成中</div><div id="load-msg">…</div><div class="bar"><i id="load-bar"></i></div></div>
+</div>
+
+<!-- プレビュー -->
+<div id="preview" class="screen hidden clear">
+  <div class="pv-card">
+    <div class="pv-title" id="pv-name">—</div>
+    <div class="pv-stats"><div><small>全長</small><b id="pv-len">—</b></div><div><small>コーナー</small><b id="pv-corners">—</b></div><div><small>周回</small><b id="pv-laps">—</b></div></div>
+    <canvas id="pv-map" width="360" height="360"></canvas>
+    <div class="row"><button id="pv-start" class="btn big">スタート！</button></div>
+    <div class="row"><button id="pv-new" class="btn ghost">別のコース</button><button id="pv-back" class="btn ghost">場所を変える</button></div>
+  </div>
+</div>
+
+<!-- リザルト -->
+<div id="results" class="screen hidden">
+  <div class="panel narrow">
+    <div class="logo small"><span class="l2" id="res-title">FINISH</span></div>
+    <div id="res-pos">1st</div>
+    <table id="res-table"></table>
+    <div class="row"><button id="res-again" class="btn big">もう一度</button></div>
+    <div class="row"><button id="res-new" class="btn ghost">別のコース</button><button id="res-menu" class="btn ghost">場所を変える</button></div>
+  </div>
+</div>
+
+<div id="pause" class="screen hidden"><div class="panel narrow"><div class="logo small"><span class="l2">PAUSE</span></div><div class="row"><button id="pause-resume" class="btn big">再開</button></div><div class="row"><button id="pause-quit" class="btn ghost">メニューに戻る</button></div></div></div>
+
+<div id="touch" class="hidden">
+  <div class="tl"><button data-k="left">◀</button><button data-k="right">▶</button></div>
+  <div class="tr"><button data-k="nitro">NITRO</button><button data-k="drift">DRIFT</button><button data-k="brake">BRAKE</button><button data-k="gas" class="gas">GAS</button></div>
+</div>
+
+<script type="module" src="js/game.js"></script>
+</body>
+</html>
