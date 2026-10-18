@@ -8,7 +8,7 @@ import { PRESETS, geocode, loadPlace, generateDemoCity, ROAD_WIDTH } from './map
 import { generateCourse, mulberry32, buildGraph, snapTrace, courseFromNodePath, makeCourse } from './course.js';
 import { MapEditor } from './editor.js';
 import { World, THEMES } from './world.js';
-import { Car, CAR_COLORS, CAR_PARAMS } from './car.js';
+import { Car, CAR_COLORS, CAR_PARAMS, CAR_VARIANTS } from './car.js';
 import { FX } from './fx.js';
 import { GameAudio } from './audio.js';
 
@@ -293,11 +293,11 @@ class Game {
     // 車
     this.cars = []; const n = o.rivals + 1; const rnd = mulberry32(this.seed + 5);
     const colors = CAR_COLORS.slice(1).sort(() => rnd() - 0.5);
-    const player = this.player = new Car({ name: 'YOU', color: CAR_COLORS[0], isPlayer: true, course });
+    const player = this.player = new Car({ name: 'YOU', color: CAR_COLORS[0], isPlayer: true, course, variant: 'gt', number: 1 });
     player.ai = { lane: 0, baseLane: 0, pace: 1 };
     const rivals = [];
     for (let i = 0; i < o.rivals; i++) {
-      const c = new Car({ name: RIVAL_NAMES[i % RIVAL_NAMES.length], color: colors[i % colors.length], skill: 0.9 + 0.12 * (i / Math.max(1, o.rivals - 1)) + rnd() * 0.03, course });
+      const c = new Car({ name: RIVAL_NAMES[i % RIVAL_NAMES.length], color: colors[i % colors.length], skill: 0.9 + 0.12 * (i / Math.max(1, o.rivals - 1)) + rnd() * 0.03, course, variant: CAR_VARIANTS[(i + 1) % CAR_VARIANTS.length], number: [7, 11, 23, 27, 34, 44, 77][i % 7] });
       c.ai = { lane: 0, baseLane: 0, pace: 1 }; rivals.push(c);
     }
     this.cars = [...rivals, player];
@@ -321,7 +321,7 @@ class Game {
       for (const c of this.cars) for (const sd of [-1, 1]) { const m = new THREE.Mesh(coneGeo, coneMat); m.position.set(0, 0.62, sd * 0.6); m.rotation.z = -0.03; m.renderOrder = 6; c.model.group.add(m); }
     }
     const fill = new THREE.PointLight(0xbcd2ff, 0, 40, 1.6); fill.position.set(-7, 5, 0); player.model.group.add(fill); this.fillLight = fill;
-    for (const c of this.cars) c.model.paint.envMapIntensity = this.T.night > 0.5 ? 3.2 : 1.3;
+    for (const c of this.cars) { const pm = c.model.paint; if (this.T.night > 0.5) { pm.envMapIntensity = 3.2; pm.metalness = 0.3; pm.roughness = 0.35; pm.emissive.set(c.color).multiplyScalar(0.09); } else pm.envMapIntensity = 1.3; }
     this.buildPads();
     this.buildMinimapBase();
     this.cacheCourseStats(); this.poiSeen = new Set();
@@ -596,7 +596,7 @@ class Game {
     }
     const p = this.player;
     for (const s of this.headlights) s.intensity = this.headOn ? 1000 : 0;
-    this.underLight.intensity = 0; this.fillLight.intensity = this.headOn ? 260 : 0;
+    this.underLight.intensity = 0; this.fillLight.intensity = this.headOn ? 650 : 0;
   }
 
   // ---------------------------------------------------------------- カメラ

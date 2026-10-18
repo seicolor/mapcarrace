@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { ROAD_WIDTH } from './mapdata.js';
 import { mulberry32 } from './course.js';
+import { makeBuildingTextures } from './textures.js';
 
 // ------------------------------------------------------------------
 // テーマ（昼 / 夕方 / 夜）
@@ -145,6 +146,7 @@ export class World {
     this.makeRoads();
     this.makeCourse();
     this.makeWalls();
+    this.makeSidewalk();
     this.makeSigns();
     this.makeGantries();
     this.makeBuildings();
@@ -348,6 +350,24 @@ export class World {
     this.root.add(gridMesh);
   }
 
+  // ---------------- 歩道(コース沿いの舗装) ----------------
+  makeSidewalk() {
+    const c = this.course, n = c.n, hw = c.halfWidth; const B = new MeshBuilder(); const up = [0, 1, 0];
+    const tex = canvasTex(128, 128, (g, w, h) => {
+      g.fillStyle = '#b9b6ae'; g.fillRect(0, 0, w, h); const im = g.getImageData(0, 0, w, h);
+      for (let i = 0; i < im.data.length; i += 4) { const nn = (Math.random() - 0.5) * 22; im.data[i] += nn; im.data[i + 1] += nn; im.data[i + 2] += nn; } g.putImageData(im, 0, 0);
+      g.strokeStyle = 'rgba(60,58,54,0.55)'; g.lineWidth = 2; for (let k = 0; k <= 4; k++) { g.beginPath(); g.moveTo(0, k * 32); g.lineTo(w, k * 32); g.stroke(); g.beginPath(); g.moveTo(k * 32 + ((Math.floor(k) % 2) * 16), 0); g.lineTo(k * 32 + ((Math.floor(k) % 2) * 16), h); g.stroke(); }
+    }, { repeat: true });
+    const w0 = hw + 0.6, w1 = hw + 9.0;
+    for (const side of [-1, 1]) for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n; const P = (q, off) => { const r = [-c.tz[q], c.tx[q]]; return [c.pts[q][0] + r[0] * side * off, 0.1, c.pts[q][1] + r[1] * side * off]; };
+      const v0 = i * c.ds / 4, v1 = (i + 1) * c.ds / 4;
+      B.quad(P(i, w0), P(i, w1), P(j, w1), P(j, w0), up, [[0, v0], [2.1, v0], [2.1, v1], [0, v1]]);
+    }
+    this.sidewalkMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9, polygonOffset: true, polygonOffsetFactor: -3.5, polygonOffsetUnits: -3.5 });
+    const m = new THREE.Mesh(B.build(), this.sidewalkMat); m.receiveShadow = true; this.root.add(m);
+  }
+
   // ---------------- ウォール ----------------
   makeWalls() {
     const c = this.course, n = c.n, hw = c.halfWidth; const B = new MeshBuilder();
@@ -409,6 +429,7 @@ export class World {
       const m = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.4, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.1 });
       this.dynamicMats.push({ m, kind: 'sign' }); return m;
     });
+    this.brandMats = mats;
     const builders = brands.map(() => new MeshBuilder());
     let cnt = 0;
     for (let i = 20; i < n - 10; i += Math.round(46 / c.ds)) {
@@ -520,58 +541,67 @@ export class World {
   }
 
   makeBuildings() {
-    const rnd = mulberry32(99);
-    const cols = 4, rows = 4, cw = 128;
-    const wallTex = canvasTex(cols * cw, rows * cw, (g, w, h) => {
-      g.fillStyle = '#f1efe9'; g.fillRect(0, 0, w, h);
-      for (let r = 0; r < rows; r++) for (let q = 0; q < cols; q++) {
-        const x = q * cw, y = r * cw; g.fillStyle = 'rgba(0,0,0,0.045)'; g.fillRect(x, y + cw - 5, cw, 5);
-        const wx = x + 24, wy = y + 26, ww = cw - 48, wh = cw - 56;
-        const gr = g.createLinearGradient(0, wy, 0, wy + wh); gr.addColorStop(0, '#6f8fb3'); gr.addColorStop(0.5, '#2b3b52'); gr.addColorStop(1, '#1b2434');
-        g.fillStyle = gr; g.fillRect(wx, wy, ww, wh);
-        g.fillStyle = 'rgba(255,255,255,0.35)'; g.fillRect(wx, wy + wh, ww, 3);
-        g.fillStyle = 'rgba(255,255,255,0.12)'; g.beginPath(); g.moveTo(wx, wy + wh * 0.6); g.lineTo(wx + ww * 0.5, wy); g.lineTo(wx + ww * 0.75, wy); g.lineTo(wx, wy + wh); g.fill();
-      }
-    }, { repeat: true });
-    const emTex = canvasTex(cols * cw, rows * cw, (g, w, h) => {
-      g.fillStyle = '#000'; g.fillRect(0, 0, w, h);
-      for (let r = 0; r < rows; r++) for (let q = 0; q < cols; q++) {
-        if (rnd() < 0.42) { const warm = rnd() < 0.7; const v = 0.55 + rnd() * 0.45;
-          g.fillStyle = warm ? `rgb(${255 * v | 0},${(200 + rnd() * 30) * v | 0},${(120 + rnd() * 30) * v | 0})` : `rgb(${(190) * v | 0},${(225) * v | 0},${255 * v | 0})`;
-          g.fillRect(q * cw + 24, r * cw + 26, cw - 48, cw - 56); }
-      }
-    }, { repeat: true });
-    const mkMat = (glass) => new THREE.MeshStandardMaterial({ map: wallTex, vertexColors: true, roughness: glass ? 0.22 : 0.72, metalness: glass ? 0.55 : 0.04, emissive: 0xffffff, emissiveMap: emTex, emissiveIntensity: 0, envMapIntensity: glass ? 1.4 : 0.6 });
-    this.bMat = mkMat(false); this.bGlassMat = mkMat(true);
-    const roofMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 });
-    this.roofMat = roofMat;
+    const rnd = mulberry32(99); const c = this.course;
+    const TX = makeBuildingTextures();
+    const mk = (t, glass, metal = 0.04) => new THREE.MeshStandardMaterial({ map: t.map, vertexColors: true, roughness: glass ? 0.2 : 0.72, metalness: glass ? 0.6 : metal, emissive: 0xffffff, emissiveMap: t.em, emissiveIntensity: 0, envMapIntensity: glass ? 1.5 : 0.6 });
+    this.bMats = { punched: mk(TX.punched, false), ribbon: mk(TX.ribbon, false, 0.18), balcony: mk(TX.balcony, false), curtain: mk(TX.curtain, true), shop: mk(TX.shop, false) };
+    const roofMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 }); this.roofMat = roofMat;
     const palette = [0xe0dacd, 0xcfcac2, 0xb9b3a7, 0xe9e2d3, 0xa7b0b8, 0xd4c7b0, 0xada398, 0x9aa5b1, 0xf0ece3, 0xc3b8a6];
-    const glassPal = [0x8fb4d6, 0x7d9fbd, 0x9db5c9, 0x6f8fa6, 0xb0c4d4];
-    const chunks = new Map(); const CELL = 300;
+    const glassPal = [0xc3d6e8, 0xaec6dc, 0xb9cde0, 0x9fb9d0, 0xd3e0ec];
+    const chunks = new Map(); const CELL = 300; const SHOP_H = 4.3;
+    const boxes = [], tanks = [], masts = [], boards = [];
+    const brandB = (this.brandMats || []).map(() => new MeshBuilder());
     for (const b of this.buildings) {
-      let pts = b.pts; if (polyArea(pts) < 0) pts = pts.slice().reverse(); // area>0
-      const h = Math.max(3, b.h); const tall = h > 55; const col = new THREE.Color(tall ? glassPal[(b.id | 0) % glassPal.length] : palette[Math.floor(rnd() * palette.length)]);
-      if (b.color) col.set(b.color); else col.multiplyScalar(0.85 + rnd() * 0.25);
-      const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length, cz = pts.reduce((a, p) => a + p[1], 0) / pts.length;
-      const key = Math.floor(cx / CELL) + ',' + Math.floor(cz / CELL) + (tall ? 'g' : '');
-      let ch = chunks.get(key); if (!ch) { ch = { wall: new MeshBuilder(), roof: new MeshBuilder(), tall }; chunks.set(key, ch); }
-      const cr = [col.r, col.g, col.b]; const ou = rnd() * 4, ov = Math.floor(rnd() * 4) / 4;
-      let dist = 0; const floorH = 3.5 * 4, winW = 3.2 * 4;
-      for (let i = 0; i < pts.length; i++) {
-        const p = pts[i], q = pts[(i + 1) % pts.length]; const dx = q[0] - p[0], dz = q[1] - p[1]; const len = Math.hypot(dx, dz); if (len < 0.05) continue;
-        const nrm = [dz / len, 0, -dx / len];
-        const u0 = (dist + ou * winW) / winW, u1 = (dist + len + ou * winW) / winW; const v0 = ov, v1 = ov + h / floorH;
-        ch.wall.quad([p[0], 0, p[1]], [q[0], 0, q[1]], [q[0], h, q[1]], [p[0], h, p[1]], nrm, [[u0, v0], [u1, v0], [u1, v1], [u0, v1]], cr);
-        dist += len;
+      let pts = b.pts; if (polyArea(pts) < 0) pts = pts.slice().reverse();
+      const h = Math.max(3, b.h); const tall = h > 55; const id = (b.id | 0) >>> 0;
+      const col = new THREE.Color(tall ? glassPal[id % glassPal.length] : palette[Math.floor(rnd() * palette.length)]);
+      if (b.color) col.set(b.color); else col.multiplyScalar(0.88 + rnd() * 0.22);
+      let cx = 0, cz = 0; for (const p of pts) { cx += p[0]; cz += p[1]; } cx /= pts.length; cz /= pts.length;
+      const key = Math.floor(cx / CELL) + ',' + Math.floor(cz / CELL);
+      let ch = chunks.get(key); if (!ch) { ch = { walls: {}, roof: new MeshBuilder() }; chunks.set(key, ch); }
+      const wallB = (st) => ch.walls[st] || (ch.walls[st] = new MeshBuilder());
+      const area = Math.abs(polyArea(pts)); const kind = b.kind || '';
+      const house = /^(house|detached|semidetached_house|terrace|bungalow)$/.test(kind) || (h < 9 && area < 300);
+      let style = 'punched';
+      if (tall) style = 'curtain'; else if (!house) { if (/apartments|residential|dormitory/.test(kind) || (h > 10 && id % 3 === 0)) style = 'balcony'; else if (/commercial|office|retail|hotel|hospital|public/.test(kind) || id % 3 === 1) style = 'ribbon'; }
+      const useShop = h > 9 && !house && !/industrial|warehouse|garage|shed|church|chapel|roof|service/.test(kind) && (id % 10) < 7;
+      const cr = [col.r, col.g, col.b], ou = rnd() * 4, ov = Math.floor(rnd() * 4) / 4, so = rnd() * 4;
+      const floorH = 3.5 * 4, winW = 3.2 * 4;
+      const addWalls = (poly, y0, y1, shop) => {
+        let dist = 0;
+        for (let i = 0; i < poly.length; i++) {
+          const p = poly[i], q = poly[(i + 1) % poly.length]; const dx = q[0] - p[0], dz = q[1] - p[1]; const len = Math.hypot(dx, dz); if (len < 0.05) continue;
+          const nrm = [dz / len, 0, -dx / len]; const u0 = (dist + ou * winW) / winW, u1 = (dist + len + ou * winW) / winW;
+          let yb = y0;
+          if (shop && len >= 4.5 && y1 - y0 > SHOP_H + 2) {
+            const su0 = (dist + so * winW) / winW, su1 = (dist + len + so * winW) / winW;
+            wallB('shop').quad([p[0], y0, p[1]], [q[0], y0, q[1]], [q[0], y0 + SHOP_H, q[1]], [p[0], y0 + SHOP_H, p[1]], nrm, [[su0, 0], [su1, 0], [su1, 1], [su0, 1]], [0.95, 0.95, 0.95]);
+            yb = y0 + SHOP_H;
+          }
+          wallB(style).quad([p[0], yb, p[1]], [q[0], yb, q[1]], [q[0], y1, q[1]], [p[0], y1, p[1]], nrm, [[u0, ov + yb / floorH], [u1, ov + yb / floorH], [u1, ov + y1 / floorH], [u0, ov + y1 / floorH]], cr);
+          dist += len;
+        }
+      };
+      // 段付き(セットバック)の高層ビル
+      const tiers = [];
+      if (tall && area > 450 && pts.length <= 12 && rnd() < 0.85) {
+        const k = 0.72; const up = pts.map(p => [cx + (p[0] - cx) * k, cz + (p[1] - cz) * k]);
+        tiers.push({ poly: pts, y0: 0, y1: h * 0.68, shop: useShop }, { poly: up, y0: h * 0.68, y1: h, shop: false });
+        if (h > 110) { /* 尖塔 */ masts.push({ x: cx, z: cz, y: h, h: 14 + rnd() * 22, r: 0.35 }); }
+      } else tiers.push({ poly: pts, y0: 0, y1: h, shop: useShop });
+      for (const t of tiers) addWalls(t.poly, t.y0, t.y1, t.shop);
+      const top = tiers[tiers.length - 1]; const topPoly = top.poly; const hy = top.y1;
+      if (tiers.length > 1) { // 下段の屋根(上段のまわり)
+        const base = tiers[0]; const contour = base.poly.map(p => new THREE.Vector2(p[0], p[1]));
+        try { for (const t of THREE.ShapeUtils.triangulateShape(contour, [])) ch.roof.tri([base.poly[t[0]][0], base.y1, base.poly[t[0]][1]], [base.poly[t[1]][0], base.y1, base.poly[t[1]][1]], [base.poly[t[2]][0], base.y1, base.poly[t[2]][1]], [0, 1, 0], null, [col.r * 0.5, col.g * 0.5, col.b * 0.5]); } catch (e) { /* skip */ }
       }
       // 屋根
       try {
-        const area = Math.abs(polyArea(pts)); const rs = b.roofShape;
-        const house = /^(house|detached|semidetached_house|residential|terrace|bungalow)$/.test(b.kind || '') && h < 11;
-        const pitched = (/^(hipped|pyramidal|gabled|half-hipped|gambrel|mansard)$/.test(rs || '') || (!rs && house && (b.id % 10) < 7)) && area < 900 && pts.length <= 14;
+        const rs = b.roofShape;
+        const pitched = (/^(hipped|pyramidal|gabled|half-hipped|gambrel|mansard)$/.test(rs || '') || (!rs && house && (id % 10) < 7)) && area < 900 && pts.length <= 14 && tiers.length === 1;
         let rc = b.roofColor ? (() => { const c2 = new THREE.Color(b.roofColor); return [c2.r, c2.g, c2.b]; })() : null;
         if (pitched) {
-          const hues = [[0.42, 0.2, 0.15], [0.22, 0.23, 0.26], [0.33, 0.2, 0.14], [0.18, 0.2, 0.22], [0.4, 0.3, 0.2]]; const hc = hues[(b.id | 0) % hues.length];
+          const hues = [[0.42, 0.2, 0.15], [0.22, 0.23, 0.26], [0.33, 0.2, 0.14], [0.18, 0.2, 0.22], [0.4, 0.3, 0.2]]; const hc = hues[id % hues.length];
           rc = rc || hc; const rh = isFinite(b.roofH) ? b.roofH : Math.min(4.5, Math.max(1.4, Math.sqrt(area) * 0.2));
           const apex = [cx, h + rh, cz];
           for (let i = 0; i < pts.length; i++) {
@@ -582,17 +612,66 @@ export class World {
             ch.roof.tri(A, Bv, apex, [nx, ny, nz], null, rc);
           }
         } else {
-          rc = rc || [col.r * 0.55, col.g * 0.55, col.b * 0.55];
-          const contour = pts.map(p => new THREE.Vector2(p[0], p[1]));
-          const tris = THREE.ShapeUtils.triangulateShape(contour, []);
-          for (const t of tris) ch.roof.tri([pts[t[0]][0], h, pts[t[0]][1]], [pts[t[1]][0], h, pts[t[1]][1]], [pts[t[2]][0], h, pts[t[2]][1]], [0, 1, 0], null, rc);
+          rc = rc || [col.r * 0.5, col.g * 0.5, col.b * 0.5];
+          const contour = topPoly.map(p => new THREE.Vector2(p[0], p[1]));
+          for (const t of THREE.ShapeUtils.triangulateShape(contour, [])) ch.roof.tri([topPoly[t[0]][0], hy + 0.05, topPoly[t[0]][1]], [topPoly[t[1]][0], hy + 0.05, topPoly[t[1]][1]], [topPoly[t[2]][0], hy + 0.05, topPoly[t[2]][1]], [0, 1, 0], null, rc);
+          // パラペット(屋上の縁)
+          const pc = [col.r * 0.82, col.g * 0.82, col.b * 0.82];
+          for (let i = 0; i < topPoly.length; i++) { const p = topPoly[i], q = topPoly[(i + 1) % topPoly.length]; const dx = q[0] - p[0], dz = q[1] - p[1], len = Math.hypot(dx, dz); if (len < 0.3) continue; ch.roof.quad([p[0], hy, p[1]], [q[0], hy, q[1]], [q[0], hy + 0.65, q[1]], [p[0], hy + 0.65, p[1]], [dz / len, 0, -dx / len], null, pc); }
+          // 屋上設備
+          if (area > 110) {
+            const nb = 1 + Math.floor(rnd() * 3); const inner = topPoly.map(p => [cx + (p[0] - cx) * 0.65, cz + (p[1] - cz) * 0.65]);
+            let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity; for (const p of inner) { x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); z0 = Math.min(z0, p[1]); z1 = Math.max(z1, p[1]); }
+            for (let t = 0, n = 0; t < 12 && n < nb; t++) { const x = x0 + rnd() * (x1 - x0), z = z0 + rnd() * (z1 - z0); if (!pointInPoly(x, z, inner)) continue; boxes.push({ x, y: hy, z, sx: 1.2 + rnd() * 2.4, sy: 0.8 + rnd() * 1.4, sz: 1.2 + rnd() * 2.2, r: rnd() * 3 }); n++; }
+            if (h < 45 && area > 220 && rnd() < 0.25) tanks.push({ x: cx, y: hy, z: cz, r: 1.1 + rnd() * 0.8, h: 2.4 + rnd() * 1.2 });
+            if (h > 38 && h <= 110 && rnd() < 0.6) masts.push({ x: cx + (rnd() - 0.5) * 3, z: cz + (rnd() - 0.5) * 3, y: hy, h: 6 + rnd() * 12, r: 0.18 });
+          }
+          if (tall && tiers.length === 1) masts.push({ x: cx, z: cz, y: hy, h: 10 + rnd() * 18, r: 0.3 });
+        }
+        // 屋上看板(コース側の縁に)
+        if (brandB.length && !pitched && h > 14 && boards.length < 28 && rnd() < 0.2) {
+          const nearI = c.locateGlobal(cx, cz); const tx = c.pts[nearI][0] - cx, tz = c.pts[nearI][1] - cz; const dl = Math.hypot(tx, tz);
+          if (dl < 170) {
+            let best = null, bd = 0.55;
+            for (let i = 0; i < topPoly.length; i++) { const p = topPoly[i], q = topPoly[(i + 1) % topPoly.length]; const dx = q[0] - p[0], dz = q[1] - p[1], len = Math.hypot(dx, dz); if (len < 9) continue; const dot = ((dz / len) * tx + (-dx / len) * tz) / dl; if (dot > bd) { bd = dot; best = { p, q, len, dx, dz }; } }
+            if (best) {
+              const { p, q, len, dx, dz } = best; const e = [dx / len, dz / len]; const nrm = [dz / len, 0, -dx / len]; const W = Math.min(len * 0.8, 15), H2 = W * 0.3;
+              const mx = (p[0] + q[0]) / 2 - nrm[0] * 0.9, mz = (p[1] + q[1]) / 2 - nrm[2] * 0.9; const y0 = hy + 2.2;
+              const P = (a, y) => [mx - e[0] * a, y, mz - e[1] * a]; const bi = boards.length % brandB.length;
+              brandB[bi].quad(P(-W / 2, y0), P(W / 2, y0), P(W / 2, y0 + H2), P(-W / 2, y0 + H2), nrm, [[0, 0], [1, 0], [1, 1], [0, 1]]);
+              boxes.push({ x: mx - e[0] * W * 0.3, y: hy, z: mz - e[1] * W * 0.3, sx: 0.35, sy: 2.4, sz: 0.35, r: 0, dark: true }, { x: mx + e[0] * W * 0.3, y: hy, z: mz + e[1] * W * 0.3, sx: 0.35, sy: 2.4, sz: 0.35, r: 0, dark: true });
+              boards.push(1);
+            }
+          }
         }
       } catch (e) { /* skip */ }
     }
     this.buildingMeshes = [];
     for (const ch of chunks.values()) {
-      if (ch.wall.pos.length) { const m = new THREE.Mesh(ch.wall.build(), ch.tall ? this.bGlassMat : this.bMat); m.castShadow = true; m.receiveShadow = true; this.root.add(m); this.buildingMeshes.push(m); }
+      for (const [st, bld] of Object.entries(ch.walls)) { if (!bld.pos.length) continue; const m = new THREE.Mesh(bld.build(), this.bMats[st]); m.castShadow = true; m.receiveShadow = true; this.root.add(m); this.buildingMeshes.push(m); }
       if (ch.roof.pos.length) { const m = new THREE.Mesh(ch.roof.build(), roofMat); m.castShadow = true; m.receiveShadow = true; this.root.add(m); this.buildingMeshes.push(m); }
+    }
+    brandB.forEach((bb, i) => { if (bb.pos.length) this.root.add(new THREE.Mesh(bb.build(), this.brandMats[i])); });
+    // 屋上設備のインスタンス
+    const d = new THREE.Object3D();
+    if (boxes.length) {
+      const im = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ roughness: 0.7, metalness: 0.3 }), boxes.length); const cc = new THREE.Color();
+      boxes.forEach((o, i) => { d.position.set(o.x, o.y, o.z); d.rotation.set(0, o.r, 0); d.scale.set(o.sx, o.sy, o.sz); d.updateMatrix(); im.setMatrixAt(i, d.matrix); cc.setHSL(0.6, 0.05, o.dark ? 0.12 : 0.45 + (i % 4) * 0.08); im.setColorAt(i, cc); });
+      im.castShadow = true; this.root.add(im);
+    }
+    if (tanks.length) {
+      const im = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 12).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ color: 0x8d9096, roughness: 0.6, metalness: 0.4 }), tanks.length);
+      tanks.forEach((o, i) => { d.position.set(o.x, o.y, o.z); d.rotation.set(0, 0, 0); d.scale.set(o.r, o.h, o.r); d.updateMatrix(); im.setMatrixAt(i, d.matrix); }); im.castShadow = true; this.root.add(im);
+    }
+    if (masts.length) {
+      const im = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.5, 1, 1, 6).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ color: 0xb8bcc4, roughness: 0.5, metalness: 0.6 }), masts.length);
+      this.aviation = [];
+      masts.forEach((o, i) => { d.position.set(o.x, o.y, o.z); d.rotation.set(0, 0, 0); d.scale.set(o.r, o.h, o.r); d.updateMatrix(); im.setMatrixAt(i, d.matrix); if (o.h > 12) this.aviation.push([o.x, o.y + o.h, o.z]); }); im.castShadow = true; this.root.add(im);
+      if (this.aviation.length) {
+        this.aviationMat = new THREE.MeshBasicMaterial({ color: 0xff2020, toneMapped: false, fog: false });
+        const lm = new THREE.InstancedMesh(new THREE.SphereGeometry(0.7, 8, 6), this.aviationMat, this.aviation.length);
+        this.aviation.forEach((p, i) => { d.position.set(p[0], p[1] + 0.3, p[2]); d.scale.setScalar(1); d.updateMatrix(); lm.setMatrixAt(i, d.matrix); }); this.root.add(lm);
+      }
     }
   }
 
@@ -659,9 +738,16 @@ export class World {
       for (let t = 0; t < tries; t++) { const x = x0 + rnd() * (x1 - x0), z = z0 + rnd() * (z1 - z0); if (!pointInPoly(x, z, p)) continue; if (c.distToCourse(x, z, 20) < hw + 3) continue; trees.push([x, z, 0.9 + rnd() * 0.9]); }
     }
     if (trees.length) {
-      const im = new THREE.InstancedMesh(treeGeo, treeMat, trees.length); const dd = new THREE.Object3D(); const cc = new THREE.Color();
-      trees.forEach((t, q) => { dd.position.set(t[0], 0, t[1]); dd.rotation.set(0, rnd() * 6, 0); dd.scale.setScalar(t[2]); dd.updateMatrix(); im.setMatrixAt(q, dd.matrix); cc.setHSL(0.24 + rnd() * 0.07, 0.45 + rnd() * 0.2, 0.7 + rnd() * 0.5); im.setColorAt(q, cc); });
-      im.castShadow = true; im.receiveShadow = true; this.root.add(im);
+      const conifer = mergeGeoms([colorize(new THREE.CylinderGeometry(0.14, 0.2, 1.6, 6).translate(0, 0.8, 0), [0.25, 0.16, 0.1]), colorize(new THREE.ConeGeometry(1.5, 2.6, 8).translate(0, 2.4, 0), [0.15, 0.36, 0.2]), colorize(new THREE.ConeGeometry(1.15, 2.2, 8).translate(0, 3.9, 0), [0.17, 0.4, 0.22]), colorize(new THREE.ConeGeometry(0.75, 1.8, 8).translate(0, 5.2, 0), [0.2, 0.44, 0.25])]);
+      const cherry = mergeGeoms([colorize(trunk.clone(), [0.28, 0.2, 0.16]), colorize(foliage.clone(), [0.95, 0.62, 0.72])]);
+      const species = [{ geo: treeGeo, list: [], hue: [0.24, 0.07, 0.45, 0.2, 0.7, 0.5] }, { geo: conifer, list: [], hue: [0.36, 0.05, 0.55, 0.15, 0.75, 0.4] }, { geo: cherry, list: [], hue: [0.95, 0.04, 0.5, 0.15, 0.85, 0.25] }];
+      trees.forEach((t, q) => { const r = rnd(); species[r < 0.58 ? 0 : (r < 0.8 ? 1 : 2)].list.push(t); });
+      const dd = new THREE.Object3D(); const cc = new THREE.Color();
+      for (const sp of species) {
+        if (!sp.list.length) continue; const im = new THREE.InstancedMesh(sp.geo, treeMat, sp.list.length);
+        sp.list.forEach((t, q) => { dd.position.set(t[0], 0, t[1]); dd.rotation.set(0, rnd() * 6, 0); dd.scale.set(t[2] * (0.9 + rnd() * 0.2), t[2] * (0.85 + rnd() * 0.4), t[2] * (0.9 + rnd() * 0.2)); dd.updateMatrix(); im.setMatrixAt(q, dd.matrix); cc.setHSL(sp.hue[0] + rnd() * sp.hue[1], sp.hue[2] + rnd() * sp.hue[3], sp.hue[4] + rnd() * sp.hue[5]); im.setColorAt(q, cc); });
+        im.castShadow = true; im.receiveShadow = true; this.root.add(im);
+      }
     }
   }
 
@@ -729,14 +815,14 @@ export class World {
     scene.background = new THREE.Color(T.fog);
     scene.fog = new THREE.Fog(T.fog, T.fogNear, T.fogFar);
     this.renderer.toneMappingExposure = T.exposure;
-    this.groundMat.color.set(T.ground); this.roadMat.color.set(T.road); this.sideMat.color.set(T.side);
+    this.groundMat.color.set(T.ground); this.roadMat.color.set(T.road); this.sideMat.color.set(T.side); this.sidewalkMat.color.setScalar(T.night > 0.5 ? 0.32 : (T.sunElev < 15 ? 0.7 : 1));
     this.courseMat.roughness = T.asphaltRough;
     this.roadMat.roughness = Math.max(0.4, T.asphaltRough + 0.05);
     for (const m of this.luMats || []) m.color.set(m.userData.base).multiplyScalar(T.night > 0.5 ? 0.3 : (T.sunElev < 15 ? 0.75 : 1));
     this.parkMat.color.set(T.night > 0.5 ? 0x1c3a22 : (T.sunElev < 15 ? 0x4b5f35 : 0x4d7a3c));
     this.waterMat.color.set(T.night > 0.5 ? 0x08162e : 0x1c4a70);
     const night = T.night;
-    for (const bm of [this.bMat, this.bGlassMat]) { bm.emissiveIntensity = night > 0.5 ? 1.15 : (night > 0.1 ? 0.45 : 0.0); }
+    for (const [k, bm] of Object.entries(this.bMats)) { const base = night > 0.5 ? 1.15 : (night > 0.1 ? 0.45 : 0.0); bm.emissiveIntensity = k === 'shop' ? (night > 0.5 ? 0.75 : (night > 0.1 ? 0.4 : 0.06)) : base; }
     this.roofMat.color.set(night > 0.5 ? 0x555555 : 0xffffff);
     for (const d of this.dynamicMats) d.m.emissiveIntensity = d.kind === 'gate' ? 0.25 + night * 0.9 : 0.1 + night * 1.0;
     for (const o of this.nightProps) o.visible = night > 0.1;
@@ -761,6 +847,7 @@ export class World {
 
   update(dt, camera, focus, time) {
     this.skyUniforms.uTime.value = time;
+    if (this.aviationMat) { const on = Math.sin(time * 3.2) > 0.2 ? 1 : 0.12; this.aviationMat.color.setRGB(2.5 * on, 0.1 * on, 0.1 * on); }
     this.sky.position.copy(camera.position);
     this.skyline.position.x = camera.position.x; this.skyline.position.z = camera.position.z;
     // 影カメラ追従
