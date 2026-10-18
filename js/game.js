@@ -5,7 +5,8 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { PRESETS, geocode, loadPlace, generateDemoCity, ROAD_WIDTH } from './mapdata.js';
-import { generateCourse, mulberry32 } from './course.js';
+import { generateCourse, mulberry32, buildGraph, snapTrace, courseFromNodePath, makeCourse } from './course.js';
+import { MapEditor } from './editor.js';
 import { World, THEMES } from './world.js';
 import { Car, CAR_COLORS, CAR_PARAMS } from './car.js';
 import { FX } from './fx.js';
@@ -71,7 +72,7 @@ class Game {
     if (sp.get('laps')) { this.opts.laps = +sp.get('laps'); this.syncSeg(); }
     if (sp.get('demo')) this.setPlace({ name: 'デモ都市（オフライン）', demo: true });
     else if (sp.get('lat') && sp.get('lon')) this.setPlace({ name: sp.get('name') || `${sp.get('lat')}, ${sp.get('lon')}`, lat: +sp.get('lat'), lon: +sp.get('lon') });
-    if (sp.get('auto') && this.place) this.startLoading();
+    if (sp.get('auto') && this.place) this.startLoading(false, sp.get('editor') ? 'editor' : 'auto');
     else setTimeout(() => this.buildBackdrop(), 50);
   }
 
@@ -108,8 +109,14 @@ class Game {
       if (!navigator.geolocation) return alert('位置情報が使えません');
       navigator.geolocation.getCurrentPosition(p => this.setPlace({ name: '現在地', lat: p.coords.latitude, lon: p.coords.longitude }), () => alert('現在地を取得できませんでした'), { timeout: 8000 });
     };
+    $('btn-map').onclick = () => { this.audio.start(); this.seed = 1 + Math.floor(Math.random() * 9999); this.startLoading(false, 'editor'); };
     $('btn-go').onclick = () => { this.audio.start(); this.seed = 1 + Math.floor(Math.random() * 9999); this.startLoading(); };
     $('pv-start').onclick = () => { this.audio.start(); this.beginCountdown(); };
+    $('pv-edit').onclick = () => this.openEditor(false);
+    $('load-retry').onclick = () => { this.forceReload = true; this.startLoading(false, this.loadMode); };
+    $('load-demo').onclick = () => { this.setPlace({ name: 'デモ都市（オフライン）', demo: true }); this.startLoading(false, this.loadMode); };
+    $('load-back').onclick = () => this.toMenu();
+    this.bindEditor();
     $('pv-new').onclick = () => { this.seed += 1; this.startLoading(true); };
     $('pv-back').onclick = () => this.toMenu();
     $('res-again').onclick = () => { this.audio.start(); this.restartRace(); };
@@ -125,7 +132,7 @@ class Game {
   }
   syncSeg() { document.querySelectorAll('.seg').forEach(seg => { const k = seg.dataset.key; seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', String(this.opts[k]) === b.dataset.v)); }); }
   show(id, on = true) { $(id).classList.toggle('hidden', !on); }
-  setPlace(p) { this.place = p; const el = $('chosen'); el.classList.add('ok'); el.textContent = '📍 ' + p.name + (p.lat !== undefined ? `  (${p.lat.toFixed(4)}, ${p.lon.toFixed(4)})` : ''); $('btn-go').disabled = false; }
+  setPlace(p) { this.place = p; const el = $('chosen'); el.classList.add('ok'); el.textContent = '📍 ' + p.name + (p.lat !== undefined ? `  (${p.lat.toFixed(4)}, ${p.lon.toFixed(4)})` : ''); $('btn-go').disabled = false; $('btn-map').disabled = false; }
   async search() {
     const q = $('q').value.trim(); if (!q) return; const list = $('results-list'); list.innerHTML = '<div style="color:#8da0c8;font-size:13px">検索中…</div>';
     try {
@@ -135,7 +142,7 @@ class Game {
       if (res.length === 1) list.firstChild.click();
     } catch (e) { list.innerHTML = '<div style="color:#ff8aa6;font-size:13px">検索に失敗しました（ネットワークをご確認ください）</div>'; }
   }
-  toMenu() { this.state = 'menu'; this.audio.silence(); ['hud', 'preview', 'results', 'pause', 'touch', 'loading'].forEach(i => this.show(i, false)); this.show('menu', true); }
+  toMenu() { this.state = 'menu'; if (this.editor) this.editor.visible = false; this.audio.silence(); ['hud', 'preview', 'results', 'pause', 'touch', 'loading', 'editor'].forEach(i => this.show(i, false)); this.show('menu', true); }
   setProgress(p, msg, title) { $('load-bar').style.width = (p * 100) + '%'; if (msg) $('load-msg').textContent = msg; if (title) $('load-title').textContent = title; }
   nextFrame() { return new Promise(r => requestAnimationFrame(() => setTimeout(r, 0))); }
 
@@ -175,32 +182,85 @@ class Game {
   }
 
   // ---------------------------------------------------------------- コース生成〜構築
-  async startLoading(regen = false) {
-    this.show('menu', false); this.show('results', false); this.show('preview', false); this.show('hud', false); this.show('loading', true);
-    this.state = 'loading'; this.audio.silence();
+  async startLoading(regen = false, mode = 'auto') {
+    this.loadMode = mode;
+    this.show('menu', false); this.show('results', false); this.show('preview', false); this.show('hud', false); this.show('editor', false); this.show('loading', true);
+    $('load-actions').classList.add('hidden'); document.querySelector('.loader').classList.remove('err'); $('load-bar').style.display = '';
+    this.state = 'loading'; this.audio.silence(); if (this.editor) this.editor.visible = false;
     try {
-      this.setProgress(0.05, '地図データを取得しています…', 'コース生成中');
+      this.setProgress(0.05, '地図データを取得しています…', mode === 'editor' ? '地図を読み込み中' : 'コース生成中');
       if (!regen || !this.data || this.data._placeKey !== this.placeKey()) {
         let data;
         if (this.place.demo) { data = generateDemoCity(7); }
-        else {
-          try { data = await loadPlace(this.place.lat, this.place.lon, { radius: this.dataRadius(), onStatus: (m) => this.setProgress(0.12, m) }); }
-          catch (e) { console.warn(e); this.fallbackNote = '地図サーバーに接続できなかったため、デモ都市を使用しています'; data = generateDemoCity(7); data.name = 'デモ都市（オフライン）'; }
-        }
-        data._placeKey = this.placeKey(); this.data = data;
-        if (!this.fallbackNote || this.place.demo) this.fallbackNote = '';
+        else { data = await loadPlace(this.place.lat, this.place.lon, { radius: this.dataRadius(), force: !!this.forceReload, onStatus: (m) => this.setProgress(0.12, m) }); }
+        this.forceReload = false;
+        data._placeKey = this.placeKey(); this.data = data; this.graph = null; this.fallbackNote = '';
       }
+      if (!this.graph) this.graph = buildGraph(this.data.roads, true);
       this.setProgress(0.35, `道路 ${this.data.roads.length} 本 / 建物 ${this.data.buildings.length} 棟を解析中…`); await this.nextFrame();
-      let course = generateCourse(this.data, { lengthTarget: this.opts.len, seed: this.seed });
-      if (!course) { this.data = generateDemoCity(7); this.data._placeKey = 'x'; this.fallbackNote = 'この場所では周回コースを作れなかったため、デモ都市を使用しています'; course = generateCourse(this.data, { lengthTarget: this.opts.len, seed: this.seed }); }
+      const course = generateCourse(this.data, { lengthTarget: this.opts.len, seed: this.seed });
+      if (mode === 'editor') { this.draft = course || null; this.show('loading', false); this.openEditor(true); return; }
+      if (!course) throw new Error('この場所では周回コースを自動で作れませんでした。「地図を見てコースを決める」で手動で描いてみてください。');
       this.course = course;
       this.setProgress(0.55, 'コースを整形し、街を3Dで組み立てています…'); await this.nextFrame();
       this.buildRace(); this.setProgress(0.95, '最終調整中…'); await this.nextFrame();
       this.show('loading', false); this.enterPreview();
     } catch (e) {
-      console.error(e); alert('コースの生成に失敗しました: ' + e.message); this.toMenu();
+      console.error(e); this.showLoadError(e);
     }
   }
+  showLoadError(e) {
+    const m = String((e && e.message) || e);
+    document.querySelector('.loader').classList.add('err'); $('load-bar').style.display = 'none';
+    $('load-title').textContent = '地図を読み込めませんでした';
+    $('load-msg').innerHTML = '地図サーバー(OpenStreetMap)が混み合っているか、通信が制限されている可能性があります。<br><small style="color:#6f7fa3">' + m.replace(/</g, '&lt;') + '</small>';
+    $('load-actions').classList.remove('hidden'); this.state = 'loading';
+  }
+
+  // ---------------------------------------------------------------- 地図エディタ
+  bindEditor() {
+    const ed = this.editor = new MapEditor($('ed-canvas'));
+    const setMode = (m) => { ed.setMode(m); $('ed-draw').classList.toggle('on', m === 'draw'); $('ed-pan').classList.toggle('on', m === 'pan'); };
+    $('ed-draw').onclick = () => setMode('draw'); $('ed-pan').onclick = () => setMode('pan'); setMode('draw');
+    ed.onStroke = (stroke) => {
+      const r = snapTrace(this.graph, stroke);
+      if (r.error) { this.edInfo(null, r.error); return; }
+      try { this.setDraft(courseFromNodePath(this.graph, r.nodePath)); } catch (e) { console.warn(e); this.edInfo(null, 'このコースは作れませんでした。別の道をなぞってください'); }
+    };
+    $('ed-auto').onclick = () => { this.seed += 1; const c = generateCourse(this.data, { lengthTarget: this.opts.len, seed: this.seed }); if (c) this.setDraft(c); else this.edInfo(null, '自動生成できませんでした'); };
+    $('ed-rev').onclick = () => { if (!this.draft) return; const info = this.draft.info; const c = makeCourse(this.draft.raw.slice().reverse()); c.info = info; this.setDraft(c, false); };
+    $('ed-clear').onclick = () => { this.draft = null; ed.setRoute(null); this.edInfo(null); };
+    $('ed-back').onclick = () => this.toMenu();
+    $('ed-go').onclick = async () => {
+      if (!this.draft) { this.edInfo(null, '先に道路をなぞるか「おまかせ」を押してください'); return; }
+      this.course = this.draft; this.show('editor', false); ed.visible = false; this.show('loading', true); this.state = 'loading';
+      $('load-actions').classList.add('hidden'); document.querySelector('.loader').classList.remove('err'); $('load-bar').style.display = '';
+      this.setProgress(0.5, '街を3Dで組み立てています…', 'コース構築中'); await this.nextFrame();
+      try { this.buildRace(); await this.nextFrame(); this.show('loading', false); this.enterPreview(); } catch (e) { console.error(e); this.showLoadError(e); }
+    };
+  }
+  setDraft(course, zoom = true) {
+    this.draft = course; this.editor.setRoute(course.pts); if (zoom) this.editor.zoomToRoute(); this.edInfo(course);
+  }
+  edInfo(course, err) {
+    const el = $('ed-info'); const warns = [...(this.data.warnings || [])];
+    if (!course) { el.innerHTML = (this.draft ? '' : '道路をなぞってコースを描いてください') + (err ? `<div class="err">${err}</div>` : '') + warns.map(w => `<div class="warn">${w}</div>`).join(''); return; }
+    const info = course.info || {}; let corners = 0, inC = false; for (let i = 0; i < course.n; i++) { const k = Math.abs(course.kappa[i]) > 0.014; if (k && !inC) corners++; inC = k; }
+    if (info.cross > 0) warns.unshift('コースが自分自身と交差しています');
+    if (info.dup > 0) warns.unshift('同じ道を重複して通っています');
+    if (info.uturns > 0) warns.unshift('急なUターンがあります');
+    el.innerHTML = `全長 <b>${(course.L / 1000).toFixed(2)}</b> km　コーナー <b>${corners}</b>` + (err ? `<div class="err">${err}</div>` : '') + warns.map(w => `<div class="warn">⚠ ${w}</div>`).join('');
+  }
+  openEditor(initial) {
+    this.state = 'editor'; this.audio.silence();
+    ['menu', 'results', 'preview', 'hud', 'loading', 'pause', 'touch'].forEach(i => this.show(i, false)); this.show('editor', true);
+    const ed = this.editor; ed.visible = true;
+    $('ed-title').textContent = ((this.place && this.place.name) || '').split(/[,（(]/)[0].trim() + ' — コースを決める';
+    if (this.edData !== this.data) { ed.setData(this.data); this.edData = this.data; } else { ed.resize(); ed.fit(); }
+    const c = initial ? this.draft : (this.course || this.draft);
+    if (c) this.setDraft(c); else { this.draft = null; ed.setRoute(null); this.edInfo(null); }
+  }
+
   buildBackdrop() {
     // メニュー背景用に手続き生成の街を表示
     try {
@@ -344,6 +404,7 @@ class Game {
     $('pv-name').textContent = (this.place.name || '').split(/[,（(]/)[0].trim() + ' GP';
     $('pv-len').textContent = (c.L / 1000).toFixed(2) + ' km'; $('pv-corners').textContent = this.stats.corners; $('pv-laps').textContent = this.opts.laps;
     this.show('preview', true); this.show('hud', false);
+    if (this.data.warnings && this.data.warnings.length) { this.fallbackNote = this.data.warnings.join(' / '); }
     if (this.fallbackNote) { const e = $('pv-name'); e.innerHTML += `<div style="font-size:11px;font-weight:500;color:#ffb36b;margin-top:4px">${this.fallbackNote}</div>`; }
     this.previewT = 0; this.camTrans = 0;
     this.applyNight();
@@ -401,8 +462,10 @@ class Game {
   // ---------------------------------------------------------------- メインループ
   frame(now) {
     const dt = Math.min(0.05, (now - this.last) / 1000); this.last = now; this.time += dt;
-    try { this.update(dt); } catch (e) { console.error(e); }
-    this.composer.render();
+    if (this.state !== 'editor') {
+      try { this.update(dt); } catch (e) { console.error(e); }
+      this.composer.render();
+    }
     requestAnimationFrame((t) => this.frame(t));
   }
 

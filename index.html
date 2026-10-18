@@ -58,14 +58,29 @@
       <div class="field"><label>周回 / ライバル</label><div class="seg" data-key="laps"><button data-v="2">2周</button><button data-v="3" class="on">3周</button><button data-v="5">5周</button></div><div class="seg" data-key="rivals" style="margin-top:6px"><button data-v="3">3台</button><button data-v="5" class="on">5台</button><button data-v="7">7台</button></div></div>
     </div>
     <div id="chosen">場所を選んでください</div>
-    <button id="btn-go" class="btn big" disabled>コースを生成してレース</button>
+    <button id="btn-map" class="btn big cyan" disabled>🗺 地図を見てコースを決める</button>
+    <button id="btn-go" class="btn big" disabled>おまかせでコースを作って走る</button>
     <div class="foot">地図データ © OpenStreetMap contributors ／ 操作: キーボード・ゲームパッド・タッチ対応</div>
   </div>
 </div>
 
 <!-- ローディング -->
 <div id="loading" class="screen hidden">
-  <div class="loader"><div class="ring"></div><div id="load-title">コース生成中</div><div id="load-msg">…</div><div class="bar"><i id="load-bar"></i></div></div>
+  <div class="loader"><div class="ring"></div><div id="load-title">コース生成中</div><div id="load-msg">…</div><div class="bar"><i id="load-bar"></i></div>
+    <div id="load-actions" class="hidden"><button id="load-retry" class="btn">もう一度試す</button><button id="load-demo" class="btn ghost">デモ都市で遊ぶ</button><button id="load-back" class="btn ghost">戻る</button></div>
+  </div>
+</div>
+
+<!-- 地図エディタ -->
+<div id="editor" class="hidden">
+  <canvas id="ed-canvas"></canvas>
+  <div id="ed-head"><div id="ed-title">コースを決める</div><div id="ed-hint">「なぞって描く」で道路をなぞると、道路に沿ったコースになります（始点と終点は自動でつながります）。ホイール/ピンチで拡大、右ドラッグ・2本指で移動。</div></div>
+  <div id="ed-info"></div>
+  <div id="ed-bar">
+    <div class="grp"><button id="ed-draw" class="tool on">✏️ なぞって描く</button><button id="ed-pan" class="tool">✋ 地図を動かす</button></div>
+    <div class="grp"><button id="ed-auto" class="tool">🎲 おまかせ</button><button id="ed-rev" class="tool">⇄ 向きを逆に</button><button id="ed-clear" class="tool">🗑 消す</button></div>
+    <div class="grp"><button id="ed-back" class="tool ghost">戻る</button><button id="ed-go" class="btn">このコースで走る ▶</button></div>
+  </div>
 </div>
 
 <!-- プレビュー -->
@@ -75,7 +90,8 @@
     <div class="pv-stats"><div><small>全長</small><b id="pv-len">—</b></div><div><small>コーナー</small><b id="pv-corners">—</b></div><div><small>周回</small><b id="pv-laps">—</b></div></div>
     <canvas id="pv-map" width="360" height="360"></canvas>
     <div class="row"><button id="pv-start" class="btn big">スタート！</button></div>
-    <div class="row"><button id="pv-new" class="btn ghost">別のコース</button><button id="pv-back" class="btn ghost">場所を変える</button></div>
+    <div class="row"><button id="pv-edit" class="btn ghost">🗺 地図で編集</button><button id="pv-new" class="btn ghost">別のコース</button></div>
+    <div class="row"><button id="pv-back" class="btn ghost">場所を変える</button></div>
   </div>
 </div>
 

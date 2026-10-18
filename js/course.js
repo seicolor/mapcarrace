@@ -47,7 +47,14 @@ export function buildGraph(roads, allowService = false) {
     sizes.push(n); nc++;
   }
   let best = 0; for (let i = 1; i < nc; i++) if (sizes[i] > sizes[best]) best = i;
-  return { nodes, adj, comp, main: best };
+  const NC = 50, ng = new Map(); const nk = (a, b) => (a + 8192) * 16384 + (b + 8192);
+  nodes.forEach((n, i) => { const k = nk(Math.floor(n.x / NC), Math.floor(n.z / NC)); (ng.get(k) || ng.set(k, []).get(k)).push(i); });
+  const nearest = (x, z, maxD) => {
+    let bi = -1, bd = maxD * maxD; const r = Math.ceil(maxD / NC), cx = Math.floor(x / NC), cz = Math.floor(z / NC);
+    for (let a = -r; a <= r; a++) for (let b = -r; b <= r; b++) { const l = ng.get(nk(cx + a, cz + b)); if (!l) continue; for (const i of l) { if (!adj[i].length) continue; const dx = nodes[i].x - x, dz = nodes[i].z - z; const d = dx * dx + dz * dz; if (d < bd) { bd = d; bi = i; } } }
+    return bi;
+  };
+  return { nodes, adj, comp, main: best, nearest };
 }
 
 class Heap {
@@ -143,6 +150,48 @@ function scoreLoop(g, nodePath, edgeIds, target, rnd) {
   score -= Math.min(curvy, 14) * 6;
   score += rnd() * 25;
   return { score, L, uturns, cross, dup, rep, near };
+}
+
+function edgeBetween(g, a, b) { for (const e of g.adj[a]) if (e.to === b) return e.id; return -1; }
+
+// なぞった軌跡(ワールド座標の点列)を道路にスナップして閉じた周回ルートにする
+export function snapTrace(g, stroke, { snap = 55 } = {}) {
+  // 20mおきに間引き
+  const pts = []; let last = null;
+  for (const p of stroke) { if (!last || Math.hypot(p[0] - last[0], p[1] - last[1]) >= 22) { pts.push(p); last = p; } }
+  if (stroke.length && last !== stroke[stroke.length - 1]) pts.push(stroke[stroke.length - 1]);
+  const wps = [];
+  for (const p of pts) { const n = g.nearest(p[0], p[1], snap); if (n >= 0 && wps[wps.length - 1] !== n) wps.push(n); }
+  if (wps.length < 2) return { error: '道路の近くをなぞってください（道路から離れすぎています）' };
+  const path = [wps[0]]; let skipped = 0;
+  const join = (a, b) => {
+    if (a === b) return;
+    const res = dijkstra(g, a, b, (e) => e.len); const pt = pathTo(res, a, b);
+    if (!pt) { skipped++; return; }
+    for (let i = 1; i < pt.nodes.length; i++) path.push(pt.nodes[i]);
+  };
+  for (let i = 1; i < wps.length; i++) join(path[path.length - 1], wps[i]);
+  // 始点へ戻って周回にする
+  if (path[path.length - 1] !== path[0]) join(path[path.length - 1], path[0]);
+  if (path[path.length - 1] === path[0]) path.pop();
+  // 行って戻るだけのヒゲ(a→b→a)を除去
+  let st = [];
+  for (const n of path) { if (st.length >= 2 && st[st.length - 2] === n) st.pop(); else st.push(n); }
+  for (let guard = 0; guard < 50 && st.length > 4; guard++) {
+    if (st[st.length - 1] === st[1]) { st.shift(); st.pop(); }
+    else if (st[st.length - 2] === st[0]) { st.pop(); st.pop(); }
+    else break;
+  }
+  path.length = 0; path.push(...st);
+  if (path.length < 6) return { error: 'コースが短すぎます。もう少し長くなぞってください' };
+  return { nodePath: path, skipped };
+}
+
+// 周回ルートの品質チェック（描いたコース用）
+export function analyzeLoop(g, nodePath) {
+  const ids = []; for (let i = 0; i < nodePath.length; i++) ids.push(edgeBetween(g, nodePath[i], nodePath[(i + 1) % nodePath.length]));
+  const sc = scoreLoop(g, nodePath, ids.filter(x => x >= 0), 2500, () => 0);
+  return sc;
 }
 
 export function findLoop(g, { target = 2500, seed = 1, cx = 0, cz = 0 }) {
@@ -245,6 +294,7 @@ export function makeCourse(loopPts, halfWidth = 7.5) {
   }
   // 高さ(ゆるいうねり)は付けず平坦
   const course = {
+    raw: loopPts,
     n, L, pts, s, ds: L / n, tx, tz, kappa, halfWidth,
     x: (i) => pts[((i % n) + n) % n][0], z: (i) => pts[((i % n) + n) % n][1],
   };
@@ -304,6 +354,13 @@ export function makeCourse(loopPts, halfWidth = 7.5) {
     for (let i = 0; i < n; i++) { const dx = x - pts[i][0], dz = z - pts[i][1]; const d = dx * dx + dz * dz; if (d < bd) { bd = d; bi = i; } }
     return bi;
   };
+  return course;
+}
+
+export function courseFromNodePath(g, nodePath) {
+  const pts = nodePath.map(i => [g.nodes[i].x, g.nodes[i].z]);
+  const course = makeCourse(pts);
+  course.info = analyzeLoop(g, nodePath);
   return course;
 }
 

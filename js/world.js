@@ -212,6 +212,13 @@ export class World {
     };
     this.parkMat = new THREE.MeshStandardMaterial({ color: 0x4d7a3c, roughness: 0.95, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
     this.waterMat = new THREE.MeshPhysicalMaterial({ color: 0x1c4a70, roughness: 0.06, metalness: 0.0, clearcoat: 1, envMapIntensity: 1.4, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+    const LUC = { commercial: 0x8a8793, retail: 0x8d8391, industrial: 0x7b7f82, residential: 0x7f7d75, plaza: 0xa5a29b, railway: 0x5b5b60 };
+    this.luMats = [];
+    for (const kind of Object.keys(LUC)) {
+      const polys = (this.data.landuse || []).filter(l => l.kind === kind).map(l => l.pts);
+      if (!polys.length) continue; const mat = new THREE.MeshStandardMaterial({ color: LUC[kind], roughness: 0.95, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+      mat.userData.base = LUC[kind]; this.luMats.push(mat); mk(polys, 0.015, mat, 600);
+    }
     mk(this.data.parks, 0.025, this.parkMat, 600);
     mk(this.data.water, 0.035, this.waterMat, 600);
   }
@@ -249,6 +256,12 @@ export class World {
         if (course.farDist(p[0], p[1]) < 420) run.push(p); else flush();
       }
       flush();
+    }
+    for (const f of this.data.foot || []) {
+      let run = [];
+      const flushF = () => { if (run.length > 1) { const sb = this.ribbon(run, f.type === 'cycleway' ? 2.2 : 2.6, 0.06); sidePos.push(...sb.pos); for (const i of sb.idx) sideIdx.push(i + sv); sv += sb.pos.length / 3; } run = []; };
+      for (const p of f.pts) { if (course.farDist(p[0], p[1]) < 300) run.push(p); else flushF(); }
+      flushF();
     }
     const mkMesh = (pos, idx, mat) => {
       if (!pos.length) return null;
@@ -538,7 +551,7 @@ export class World {
     for (const b of this.buildings) {
       let pts = b.pts; if (polyArea(pts) < 0) pts = pts.slice().reverse(); // area>0
       const h = Math.max(3, b.h); const tall = h > 55; const col = new THREE.Color(tall ? glassPal[(b.id | 0) % glassPal.length] : palette[Math.floor(rnd() * palette.length)]);
-      col.multiplyScalar(0.85 + rnd() * 0.25);
+      if (b.color) col.set(b.color); else col.multiplyScalar(0.85 + rnd() * 0.25);
       const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length, cz = pts.reduce((a, p) => a + p[1], 0) / pts.length;
       const key = Math.floor(cx / CELL) + ',' + Math.floor(cz / CELL) + (tall ? 'g' : '');
       let ch = chunks.get(key); if (!ch) { ch = { wall: new MeshBuilder(), roof: new MeshBuilder(), tall }; chunks.set(key, ch); }
@@ -553,10 +566,27 @@ export class World {
       }
       // 屋根
       try {
-        const contour = pts.map(p => new THREE.Vector2(p[0], p[1]));
-        const tris = THREE.ShapeUtils.triangulateShape(contour, []);
-        const rc = [col.r * 0.55, col.g * 0.55, col.b * 0.55];
-        for (const t of tris) ch.roof.tri([pts[t[0]][0], h, pts[t[0]][1]], [pts[t[1]][0], h, pts[t[1]][1]], [pts[t[2]][0], h, pts[t[2]][1]], [0, 1, 0], null, rc);
+        const area = Math.abs(polyArea(pts)); const rs = b.roofShape;
+        const house = /^(house|detached|semidetached_house|residential|terrace|bungalow)$/.test(b.kind || '') && h < 11;
+        const pitched = (/^(hipped|pyramidal|gabled|half-hipped|gambrel|mansard)$/.test(rs || '') || (!rs && house && (b.id % 10) < 7)) && area < 900 && pts.length <= 14;
+        let rc = b.roofColor ? (() => { const c2 = new THREE.Color(b.roofColor); return [c2.r, c2.g, c2.b]; })() : null;
+        if (pitched) {
+          const hues = [[0.42, 0.2, 0.15], [0.22, 0.23, 0.26], [0.33, 0.2, 0.14], [0.18, 0.2, 0.22], [0.4, 0.3, 0.2]]; const hc = hues[(b.id | 0) % hues.length];
+          rc = rc || hc; const rh = isFinite(b.roofH) ? b.roofH : Math.min(4.5, Math.max(1.4, Math.sqrt(area) * 0.2));
+          const apex = [cx, h + rh, cz];
+          for (let i = 0; i < pts.length; i++) {
+            const p = pts[i], q = pts[(i + 1) % pts.length]; const A = [p[0], h, p[1]], Bv = [q[0], h, q[1]];
+            const e1 = [Bv[0] - A[0], 0, Bv[2] - A[2]], e2 = [apex[0] - A[0], apex[1] - A[1], apex[2] - A[2]];
+            let nx = e1[1] * e2[2] - e1[2] * e2[1], ny = e1[2] * e2[0] - e1[0] * e2[2], nz = e1[0] * e2[1] - e1[1] * e2[0]; const nl = Math.hypot(nx, ny, nz) || 1;
+            nx /= nl; ny /= nl; nz /= nl; if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; }
+            ch.roof.tri(A, Bv, apex, [nx, ny, nz], null, rc);
+          }
+        } else {
+          rc = rc || [col.r * 0.55, col.g * 0.55, col.b * 0.55];
+          const contour = pts.map(p => new THREE.Vector2(p[0], p[1]));
+          const tris = THREE.ShapeUtils.triangulateShape(contour, []);
+          for (const t of tris) ch.roof.tri([pts[t[0]][0], h, pts[t[0]][1]], [pts[t[1]][0], h, pts[t[1]][1]], [pts[t[2]][0], h, pts[t[2]][1]], [0, 1, 0], null, rc);
+        }
       } catch (e) { /* skip */ }
     }
     this.buildingMeshes = [];
@@ -618,6 +648,8 @@ export class World {
         trees.push([x, z, 0.8 + rnd() * 0.7]);
       }
     }
+    // OSMの実在の街路樹
+    let tc = 0; for (const t of this.data.trees || []) { if (tc >= 700) break; if (c.farDist(t[0], t[1]) > 260) continue; if (c.distToCourse(t[0], t[1], 20) < hw + 2.2) continue; if (this.pointInBuilding(t[0], t[1], 1)) continue; trees.push([t[0], t[1], 0.8 + rnd() * 0.6]); tc++; }
     // 公園内
     for (const p of this.data.parks) {
       if (trees.length > 900) break;
@@ -700,6 +732,7 @@ export class World {
     this.groundMat.color.set(T.ground); this.roadMat.color.set(T.road); this.sideMat.color.set(T.side);
     this.courseMat.roughness = T.asphaltRough;
     this.roadMat.roughness = Math.max(0.4, T.asphaltRough + 0.05);
+    for (const m of this.luMats || []) m.color.set(m.userData.base).multiplyScalar(T.night > 0.5 ? 0.3 : (T.sunElev < 15 ? 0.75 : 1));
     this.parkMat.color.set(T.night > 0.5 ? 0x1c3a22 : (T.sunElev < 15 ? 0x4b5f35 : 0x4d7a3c));
     this.waterMat.color.set(T.night > 0.5 ? 0x08162e : 0x1c4a70);
     const night = T.night;
