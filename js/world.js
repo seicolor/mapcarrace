@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { ROAD_WIDTH } from './mapdata.js';
 import { mulberry32 } from './course.js';
 import { makeBuildingTextures } from './textures.js';
+import { Sky } from 'three/addons/objects/Sky.js';
+import { buildStreetDetails, updateSignals } from './street.js';
 
 // ------------------------------------------------------------------
 // テーマ（昼 / 夕方 / 夜）
@@ -29,6 +31,15 @@ export const THEMES = {
     asphaltRough: 0.38, wet: 0.5,
   },
 };
+
+export function withWeather(T, weather) {
+  if (weather !== 'rain') return { ...T, rain: 0 };
+  const night = T.night > 0.5;
+  return { ...T, rain: 1, sunI: T.sunI * (night ? 0.6 : 0.28), hemiI: T.hemiI * (night ? 1.0 : 1.25), hemiSky: night ? T.hemiSky : 0x9aa6b4,
+    fog: night ? 0x0b1220 : (T.sunElev < 15 ? 0x6b6670 : 0x8d98a3), fogNear: 60, fogFar: night ? 900 : 1300,
+    skyTop: night ? T.skyTop : 0x5d6773, skyHor: night ? T.skyHor : 0x9aa3ad, exposure: T.exposure * (night ? 1.05 : 1.0), bloom: T.bloom * 1.15,
+    asphaltRough: 0.12, wet: 1, env: T.env * 1.2, skyline: night ? T.skyline : 0x7c8794 };
+}
 
 function canvasTex(w, h, draw, { repeat = false, srgb = true, aniso = 8 } = {}) {
   const c = document.createElement('canvas'); c.width = w; c.height = h;
@@ -127,9 +138,10 @@ void main(){
 }`;
 
 export class World {
-  constructor(renderer, scene, data, course, { theme = 'day', placeName = '' } = {}) {
+  constructor(renderer, scene, data, course, { theme = 'day', placeName = '', weather = 'clear', quality = 'high' } = {}) {
     this.renderer = renderer; this.scene = scene; this.data = data; this.course = course;
-    this.themeName = theme; this.T = THEMES[theme]; this.placeName = placeName;
+    this.weather = weather; this.quality = quality;
+    this.themeName = theme; this.T = withWeather(THEMES[theme], weather); this.placeName = placeName;
     this.rnd = mulberry32(12345);
     this.root = new THREE.Group(); scene.add(this.root);
     this.dynamicMats = [];
@@ -140,6 +152,7 @@ export class World {
     const T = this.T, scene = this.scene;
     this.makeSky();
     this.makeLights();
+    this.makeTerrain();
     this.makeGround();
     this.prepareBuildings();
     this.makeParksWater();
@@ -152,6 +165,7 @@ export class World {
     this.makeBuildings();
     this.makeProps();
     this.makeLandmarks();
+    try { this.street = buildStreetDetails(this); } catch (e) { console.warn('street details', e); this.street = null; }
     this.makeSkyline();
     this.applyTheme();
   }
@@ -166,6 +180,10 @@ export class World {
     this.sky = new THREE.Mesh(new THREE.SphereGeometry(4500, 48, 24), mat);
     this.sky.frustumCulled = false; this.sky.renderOrder = -10;
     this.root.add(this.sky);
+    // 物理ベースの大気散乱スカイ(昼・夕方)
+    this.skyPB = new Sky(); this.skyPB.scale.setScalar(4200); this.skyPB.frustumCulled = false; this.skyPB.renderOrder = -10;
+    this.skyPB.material.depthWrite = false; this.skyPB.material.fog = false;
+    this.root.add(this.skyPB);
   }
 
   makeLights() {
@@ -181,19 +199,85 @@ export class World {
     this.sunDir = new THREE.Vector3();
   }
 
-  // ---------------- 地面 ----------------
+  // ---------------- 地形(高さ場) ----------------
+  makeTerrain() {
+    const c = this.course, n = c.n, hw = c.halfWidth; const dem = this.data.terrain && this.data.terrain.h;
+    this.E = (this.data.radius || 1300) + 300;
+    if (!dem) { this.H = () => 0; c.y = new Float32Array(n); this.hasTerrain = false; return; }
+    this.hasTerrain = true;
+    // コースの高さプロファイル: 平滑化 + 勾配制限
+    let y = new Float32Array(n); for (let i = 0; i < n; i++) y[i] = dem(c.pts[i][0], c.pts[i][1]);
+    const win = Math.max(2, Math.round(24 / c.ds));
+    for (let pass = 0; pass < 4; pass++) { const t = new Float32Array(n); for (let i = 0; i < n; i++) { let a = 0; for (let k = -win; k <= win; k++) a += y[(i + k + n) % n]; t[i] = a / (2 * win + 1); } y = t; }
+    const maxD = 0.13 * c.ds;
+    for (let rep = 0; rep < 6; rep++) for (let i = 0; i < n; i++) { const j = (i + 1) % n; const d = y[j] - y[i]; if (Math.abs(d) > maxD) { const e = (Math.abs(d) - maxD) / 2 * Math.sign(d); y[i] += e; y[j] -= e; } }
+    c.y = y;
+    // 高さグリッド(コース周辺はコース高さに合わせて滑らかに接続)
+    const E = this.E, cell = 10, N = Math.ceil(2 * E / cell) + 1; const grid = new Float32Array(N * N);
+    const sm = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+    let lo = Infinity;
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const x = -E + i * cell, z = -E + j * cell; let h = dem(x, z); const nr = c.nearest(x, z, 75);
+      if (nr) { const w = sm(hw + 3, hw + 55, nr.d); h = y[nr.idx] * (1 - w) + h * w; }
+      grid[j * N + i] = h; if (h < lo) lo = h;
+    }
+    this.minH = lo;
+    this.H = (x, z) => {
+      const fx = Math.min(N - 1.0001, Math.max(0, (x + E) / cell)), fz = Math.min(N - 1.0001, Math.max(0, (z + E) / cell));
+      const i = fx | 0, j = fz | 0, u = fx - i, v = fz - j, k = j * N + i;
+      return (grid[k] * (1 - u) + grid[k + 1] * u) * (1 - v) + (grid[k + N] * (1 - u) + grid[k + N + 1] * u) * v;
+    };
+  }
+
+  drape(geo) {
+    if (!this.hasTerrain) return geo;
+    const p = geo.getAttribute('position'); for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) + this.H(p.getX(i), p.getZ(i)));
+    p.needsUpdate = true; geo.computeBoundingSphere(); geo.computeBoundingBox(); return geo;
+  }
+
+  // ---------------- 地面(航空写真 or 土地利用を描いた地図) ----------------
   makeGround() {
-    const tex = canvasTex(256, 256, (g, w, h) => {
+    const E = this.E, d = this.data;
+    const far = canvasTex(256, 256, (g, w, h) => {
       g.fillStyle = '#c9c9c9'; g.fillRect(0, 0, w, h);
-      const im = g.getImageData(0, 0, w, h);
-      for (let i = 0; i < im.data.length; i += 4) { const n = (Math.random() - 0.5) * 38; im.data[i] += n; im.data[i + 1] += n; im.data[i + 2] += n; }
-      g.putImageData(im, 0, 0);
-      g.strokeStyle = 'rgba(0,0,0,0.10)'; g.lineWidth = 2; g.strokeRect(0, 0, w, h);
+      const im = g.getImageData(0, 0, w, h); for (let i = 0; i < im.data.length; i += 4) { const n = (Math.random() - 0.5) * 38; im.data[i] += n; im.data[i + 1] += n; im.data[i + 2] += n; } g.putImageData(im, 0, 0);
     }, { repeat: true });
-    tex.repeat.set(1200, 1200);
-    this.groundMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95, metalness: 0 });
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(9000, 9000), this.groundMat);
-    m.rotation.x = -Math.PI / 2; m.receiveShadow = true; this.root.add(m);
+    far.repeat.set(1200, 1200);
+    this.groundMat = new THREE.MeshStandardMaterial({ map: far, roughness: 0.95, metalness: 0 });
+    const fm = new THREE.Mesh(new THREE.PlaneGeometry(9000, 9000), this.groundMat); fm.rotation.x = -Math.PI / 2; fm.position.y = (this.hasTerrain ? this.minH : 0) - 2.5; fm.receiveShadow = true; this.root.add(fm);
+    // 近景の地面テクスチャ
+    const SIZE = 2048; const cv = document.createElement('canvas'); cv.width = cv.height = SIZE; const g = cv.getContext('2d', { willReadFrequently: true });
+    const S = SIZE / (2 * E); const P = (p) => [(p[0] + E) * S, (p[1] + E) * S];
+    const poly = (pts) => { g.beginPath(); pts.forEach((p, i) => { const q = P(p); i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); };
+    g.fillStyle = '#8b8a85'; g.fillRect(0, 0, SIZE, SIZE);
+    if (d.imagery) {
+      const R0 = d.imagery.R; const a = P([-R0, -R0]), b = P([R0, R0]);
+      g.drawImage(d.imagery.canvas, a[0], a[1], b[0] - a[0], b[1] - a[1]);
+      // 外周を少しぼかしてなじませる
+      const gr = g.createRadialGradient(SIZE / 2, SIZE / 2, (b[0] - a[0]) * 0.46, SIZE / 2, SIZE / 2, (b[0] - a[0]) * 0.56); gr.addColorStop(0, 'rgba(139,138,133,0)'); gr.addColorStop(1, 'rgba(139,138,133,1)'); g.fillStyle = gr; g.fillRect(0, 0, SIZE, SIZE);
+      this.imageryCredit = d.imagery.credit;
+    } else {
+      const LU = { commercial: '#8f8b95', retail: '#958a96', industrial: '#82868a', residential: '#928d83', plaza: '#aeaba3', railway: '#6e6d69' };
+      for (const l of d.landuse || []) { g.fillStyle = LU[l.kind] || '#8f8b85'; poly(l.pts); g.fill(); }
+      g.fillStyle = '#5b8a45'; for (const p of d.parks) { poly(p); g.fill(); }
+      g.fillStyle = '#2d5d84'; for (const w of d.water) { poly(w); g.fill(); }
+      const im = g.getImageData(0, 0, SIZE, SIZE); const dd = im.data; for (let i = 0; i < dd.length; i += 4) { const n = (Math.random() - 0.5) * 18; dd[i] += n; dd[i + 1] += n; dd[i + 2] += n; } g.putImageData(im, 0, 0);
+    }
+    const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 16;
+    const detail = canvasTex(256, 256, (gg, w, h) => { gg.fillStyle = '#808080'; gg.fillRect(0, 0, w, h); const im = gg.getImageData(0, 0, w, h); for (let i = 0; i < im.data.length; i += 4) { const n = (Math.random() - 0.5) * 120; im.data[i] += n; im.data[i + 1] += n; im.data[i + 2] += n; } gg.putImageData(im, 0, 0); }, { repeat: true, srgb: false });
+    this.nearGroundMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.93, metalness: 0 });
+    this.nearGroundMat.onBeforeCompile = (sh) => {
+      sh.uniforms.uDetail = { value: detail };
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec2 vWp;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvWp = (modelMatrix * vec4(transformed, 1.0)).xz;');
+      sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec2 vWp; uniform sampler2D uDetail;').replace('#include <map_fragment>', '#include <map_fragment>\nfloat dn = texture2D(uDetail, vWp * 0.21).r * 0.55 + texture2D(uDetail, vWp * 0.031).r * 0.45; diffuseColor.rgb *= 0.8 + dn * 0.4;');
+    };
+    const seg = this.hasTerrain ? Math.round(2 * E / 10) : 4;
+    const geo = new THREE.PlaneGeometry(2 * E, 2 * E, seg, seg); geo.rotateX(-Math.PI / 2);
+    const uv = geo.getAttribute('uv'), pos = geo.getAttribute('position');
+    for (let i = 0; i < pos.count; i++) { uv.setXY(i, (pos.getX(i) + E) / (2 * E), 1 - (pos.getZ(i) + E) / (2 * E)); }
+    if (this.hasTerrain) { for (let i = 0; i < pos.count; i++) pos.setY(i, this.H(pos.getX(i), pos.getZ(i)) - 0.02); geo.computeVertexNormals(); }
+    tex.flipY = true;
+    const nm = new THREE.Mesh(geo, this.nearGroundMat); nm.receiveShadow = true; this.root.add(nm);
   }
 
   makeParksWater() {
@@ -205,7 +289,7 @@ export class World {
         if (this.course.distToCourse(cx, cz, maxD + 400) > maxD + 300 && Math.hypot(cx, cz) > 700) continue;
         try {
           const shape = new THREE.Shape(p.map(q => new THREE.Vector2(q[0], -q[1])));
-          const g = new THREE.ShapeGeometry(shape); g.rotateX(-Math.PI / 2); g.translate(0, y, 0); geoms.push(g);
+          const g = new THREE.ShapeGeometry(shape); g.rotateX(-Math.PI / 2); let base = 0; if (this.hasTerrain) { base = Infinity; for (const q of p) base = Math.min(base, this.H(q[0], q[1])); } g.translate(0, y + base, 0); geoms.push(g);
         } catch (e) { /* ignore */ }
       }
       if (!geoms.length) return null;
@@ -214,33 +298,34 @@ export class World {
     };
     this.parkMat = new THREE.MeshStandardMaterial({ color: 0x4d7a3c, roughness: 0.95, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
     this.waterMat = new THREE.MeshPhysicalMaterial({ color: 0x1c4a70, roughness: 0.06, metalness: 0.0, clearcoat: 1, envMapIntensity: 1.4, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
-    const LUC = { commercial: 0x8a8793, retail: 0x8d8391, industrial: 0x7b7f82, residential: 0x7f7d75, plaza: 0xa5a29b, railway: 0x5b5b60 };
     this.luMats = [];
-    for (const kind of Object.keys(LUC)) {
-      const polys = (this.data.landuse || []).filter(l => l.kind === kind).map(l => l.pts);
-      if (!polys.length) continue; const mat = new THREE.MeshStandardMaterial({ color: LUC[kind], roughness: 0.95, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
-      mat.userData.base = LUC[kind]; this.luMats.push(mat); mk(polys, 0.015, mat, 600);
-    }
-    mk(this.data.parks, 0.025, this.parkMat, 600);
     mk(this.data.water, 0.035, this.waterMat, 600);
   }
 
   // ---------------- 道路 ----------------
   ribbon(pts, width, y) {
-    // 折れ線 → 帯メッシュ(位置のみ)。miter 付き
-    const n = pts.length; const pos = [], idx = [];
+    // 折れ線 → 帯メッシュ(位置のみ)。miter 付き。起伏がある時は細かく分割して地形に沿わせる
+    if (this.hasTerrain) {
+      const dense = [pts[0]];
+      for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i]; const l = Math.hypot(b[0] - a[0], b[1] - a[1]); const k = Math.ceil(l / 6); for (let j = 1; j <= k; j++) dense.push([a[0] + (b[0] - a[0]) * j / k, a[1] + (b[1] - a[1]) * j / k]); }
+      pts = dense;
+    }
+    const n = pts.length; const pos = [], idx = [], uv = []; let along = 0;
     for (let i = 0; i < n; i++) {
       const a = pts[Math.max(0, i - 1)], b = pts[i], c = pts[Math.min(n - 1, i + 1)];
+      if (i > 0) along += Math.hypot(b[0] - pts[i - 1][0], b[1] - pts[i - 1][1]); uv.push(0, along / 12, 1, along / 12);
       let dx = c[0] - a[0], dz = c[1] - a[1]; const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
       const nx = -dz, nz = dx; const hw = width / 2;
-      pos.push(b[0] - nx * hw, y, b[1] - nz * hw, b[0] + nx * hw, y, b[1] + nz * hw);
+      const x1 = b[0] - nx * hw, z1 = b[1] - nz * hw, x2 = b[0] + nx * hw, z2 = b[1] + nz * hw;
+      pos.push(x1, y + this.H(x1, z1), z1, x2, y + this.H(x2, z2), z2);
     }
     for (let i = 0; i + 1 < n; i++) { const o = i * 2; idx.push(o, o + 2, o + 1, o + 1, o + 2, o + 3); }
-    return { pos, idx };
+    return { pos, idx, uv };
   }
 
   makeRoads() {
-    const course = this.course; const roadPos = [], roadIdx = [], sidePos = [], sideIdx = [];
+    const course = this.course; const roadPos = [], roadIdx = [], sidePos = [], sideIdx = [], roadUv = [];
+    if (this.data.imagery) { this.sideMat = new THREE.MeshStandardMaterial(); this.roadMat = new THREE.MeshStandardMaterial(); return; }
     let rv = 0, sv = 0;
     for (const r of this.data.roads) {
       if (r.tunnel) continue;
@@ -249,7 +334,7 @@ export class World {
       let run = [];
       const flush = () => {
         if (run.length > 1) {
-          const rb = this.ribbon(run, w, 0.09); roadPos.push(...rb.pos); for (const i of rb.idx) roadIdx.push(i + rv); rv += rb.pos.length / 3;
+          const rb = this.ribbon(run, w, 0.09); roadPos.push(...rb.pos); roadUv.push(...rb.uv); for (const i of rb.idx) roadIdx.push(i + rv); rv += rb.pos.length / 3;
           const sb = this.ribbon(run, w + 3.6, 0.05); sidePos.push(...sb.pos); for (const i of sb.idx) sideIdx.push(i + sv); sv += sb.pos.length / 3;
         }
         run = [];
@@ -265,10 +350,10 @@ export class World {
       for (const p of f.pts) { if (course.farDist(p[0], p[1]) < 300) run.push(p); else flushF(); }
       flushF();
     }
-    const mkMesh = (pos, idx, mat) => {
+    const mkMesh = (pos, idx, mat, uv) => {
       if (!pos.length) return null;
       const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); if (uv) g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
       g.setIndex(idx); g.computeVertexNormals();
       // computeVertexNormals の向きが下向きなら反転
       const nrm = g.getAttribute('normal'); let sum = 0; for (let i = 0; i < nrm.count; i++) sum += nrm.getY(i);
@@ -277,7 +362,12 @@ export class World {
     };
     this.sideMat = new THREE.MeshStandardMaterial({ color: 0x92918b, roughness: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
     this.roadMat = new THREE.MeshStandardMaterial({ color: 0x2f3237, roughness: 0.8, metalness: 0.0, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
-    mkMesh(sidePos, sideIdx, this.sideMat); mkMesh(roadPos, roadIdx, this.roadMat);
+    const mark = canvasTex(64, 256, (g, w, h) => {
+      g.fillStyle = '#bdbdbd'; g.fillRect(0, 0, w, h); const im = g.getImageData(0, 0, w, h); for (let i = 0; i < im.data.length; i += 4) { const nn = (Math.random() - 0.5) * 40; im.data[i] += nn; im.data[i + 1] += nn; im.data[i + 2] += nn; } g.putImageData(im, 0, 0);
+      g.fillStyle = 'rgba(250,250,250,0.95)'; g.fillRect(3, 0, 3, h); g.fillRect(w - 6, 0, 3, h); g.fillRect(w / 2 - 1.5, 20, 3, 120);
+    }, { repeat: true }); mark.wrapS = THREE.ClampToEdgeWrapping;
+    this.roadMat.map = mark; this.roadMat.color.setScalar(0.32);
+    mkMesh(sidePos, sideIdx, this.sideMat); mkMesh(roadPos, roadIdx, this.roadMat, roadUv);
   }
 
   // ---------------- コース路面 ----------------
@@ -309,7 +399,7 @@ export class World {
       B.quad(L(i), R(i), R(i + 1), L(i + 1), up, [[0, s0], [1, s0], [1, s1], [0, s1]]);
     }
     this.courseMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.8, metalness: 0.0, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
-    const m = new THREE.Mesh(B.build(), this.courseMat); m.receiveShadow = true; this.root.add(m);
+    const m = new THREE.Mesh(this.drape(B.build()), this.courseMat); m.receiveShadow = true; this.root.add(m);
 
     // 縁石 (コーナー内側)
     const K = new MeshBuilder(); const kw = 1.1;
@@ -325,14 +415,14 @@ export class World {
     }
     if (K.pos.length) {
       this.kerbMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5 });
-      const km = new THREE.Mesh(K.build(), this.kerbMat); km.receiveShadow = true; this.root.add(km);
+      const km = new THREE.Mesh(this.drape(K.build()), this.kerbMat); km.receiveShadow = true; this.root.add(km);
     }
     // スタートライン(チェッカー) + グリッド枠
     const chk = canvasTex(256, 64, (g, w, h) => { for (let x = 0; x < 16; x++) for (let y = 0; y < 4; y++) { g.fillStyle = (x + y) % 2 ? '#111' : '#f4f4f4'; g.fillRect(x * 16, y * 16, 16, 16); } });
     const SB = new MeshBuilder(); const ss = 1.6 / c.ds;
     const a0 = L(0), a1 = R(0), b0 = L(Math.round(ss)), b1 = R(Math.round(ss));
     SB.quad(a0, a1, b1, b0, up, [[0, 0], [1, 0], [1, 1], [0, 1]]);
-    const startMesh = new THREE.Mesh(SB.build(), new THREE.MeshStandardMaterial({ map: chk, roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6 }));
+    const startMesh = new THREE.Mesh(this.drape(SB.build()), new THREE.MeshStandardMaterial({ map: chk, roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6 }));
     startMesh.receiveShadow = true; this.root.add(startMesh);
     // グリッド枠
     const gridTex = canvasTex(128, 128, (g, w, h) => { g.clearRect(0, 0, w, h); g.strokeStyle = 'rgba(255,255,255,0.9)'; g.lineWidth = 8; g.beginPath(); g.moveTo(10, 120); g.lineTo(10, 10); g.lineTo(118, 10); g.lineTo(118, 120); g.stroke(); });
@@ -346,7 +436,7 @@ export class World {
       GB.quad(P(-w / 2, -l / 2), P(w / 2, -l / 2), P(w / 2, l / 2), P(-w / 2, l / 2), up, [[0, 0], [1, 0], [1, 1], [0, 1]]);
     }
     this.gridMat = new THREE.MeshBasicMaterial({ map: gridTex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6 });
-    const gridMesh = new THREE.Mesh(GB.build(), this.gridMat);
+    const gridMesh = new THREE.Mesh(this.drape(GB.build()), this.gridMat);
     this.root.add(gridMesh);
   }
 
@@ -365,7 +455,7 @@ export class World {
       B.quad(P(i, w0), P(i, w1), P(j, w1), P(j, w0), up, [[0, v0], [2.1, v0], [2.1, v1], [0, v1]]);
     }
     this.sidewalkMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9, polygonOffset: true, polygonOffsetFactor: -3.5, polygonOffsetUnits: -3.5 });
-    const m = new THREE.Mesh(B.build(), this.sidewalkMat); m.receiveShadow = true; this.root.add(m);
+    const m = new THREE.Mesh(this.drape(B.build()), this.sidewalkMat); m.receiveShadow = true; this.root.add(m);
   }
 
   // ---------------- ウォール ----------------
@@ -388,7 +478,7 @@ export class World {
       }
     }
     this.wallMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.55, metalness: 0.05 });
-    const m = new THREE.Mesh(B.build(), this.wallMat); m.castShadow = true; m.receiveShadow = true; this.root.add(m);
+    const m = new THREE.Mesh(this.drape(B.build()), this.wallMat); m.castShadow = true; m.receiveShadow = true; this.root.add(m);
 
     // タイヤバリア (きついコーナー外側)
     const tireGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.34, 14); const tireMat = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.9 });
@@ -402,7 +492,7 @@ export class World {
       const im = new THREE.InstancedMesh(tireGeo, tireMat, spots.length * 3); let q = 0; const d = new THREE.Object3D();
       const white = new THREE.Color(0xffffff), red = new THREE.Color(0xd8232a);
       for (let s = 0; s < spots.length; s++) for (let l = 0; l < 3; l++) {
-        d.position.set(spots[s][0], 0.17 + l * 0.35, spots[s][1]); d.rotation.set(0, (s * 0.7 + l) % 6, 0); d.updateMatrix(); im.setMatrixAt(q, d.matrix);
+        d.position.set(spots[s][0], 0.17 + l * 0.35 + this.H(spots[s][0], spots[s][1]), spots[s][1]); d.rotation.set(0, (s * 0.7 + l) % 6, 0); d.updateMatrix(); im.setMatrixAt(q, d.matrix);
         im.setColorAt(q, (s % 3 === 0) ? red.clone().multiplyScalar(0.5) : white.clone().multiplyScalar(0.12)); q++;
       }
       im.castShadow = true; im.receiveShadow = true; this.root.add(im);
@@ -445,7 +535,7 @@ export class World {
       const dir = side === -1 ? 1 : -1;
       builders[bi].quad(P(-W / 2 * dir, y0), P(W / 2 * dir, y0), P(W / 2 * dir, y0 + H), P(-W / 2 * dir, y0 + H), nrm, [[0, 0], [1, 0], [1, 1], [0, 1]]);
     }
-    for (let k = 0; k < brands.length; k++) if (builders[k].pos.length) { const m = new THREE.Mesh(builders[k].build(), mats[k]); m.castShadow = false; this.root.add(m); }
+    for (let k = 0; k < brands.length; k++) if (builders[k].pos.length) { const m = new THREE.Mesh(this.drape(builders[k].build()), mats[k]); m.castShadow = false; this.root.add(m); }
 
     // シェブロン
     const chev = (flip) => canvasTex(128, 128, (g, w, h) => {
@@ -467,7 +557,7 @@ export class World {
       const dir = side === -1 ? 1 : -1; const which = side === -1 ? 0 : 1;
       cb[which].quad(P(-W / 2 * dir, 1.15), P(W / 2 * dir, 1.15), P(W / 2 * dir, 1.15 + 1.5), P(-W / 2 * dir, 1.15 + 1.5), nrm, [[0, 0], [1, 0], [1, 1], [0, 1]]);
     }
-    for (let k = 0; k < 2; k++) if (cb[k].pos.length) this.root.add(new THREE.Mesh(cb[k].build(), chevMat[k]));
+    for (let k = 0; k < 2; k++) if (cb[k].pos.length) this.root.add(new THREE.Mesh(this.drape(cb[k].build()), chevMat[k]));
   }
 
   // ---------------- ゲート ----------------
@@ -481,7 +571,7 @@ export class World {
     const pillarMat = new THREE.MeshStandardMaterial({ color: 0x2b2f38, roughness: 0.4, metalness: 0.7 });
     const make = (idx, label, a, b, tall) => {
       const q = idx % c.n; const th = Math.atan2(c.tz[q], c.tx[q]); const g = new THREE.Group();
-      g.position.set(c.pts[q][0], 0.14, c.pts[q][1]); g.rotation.y = -th;
+      g.position.set(c.pts[q][0], 0.14 + this.H(c.pts[q][0], c.pts[q][1]), c.pts[q][1]); g.rotation.y = -th;
       const span = hw * 2 + 3; const H = tall ? 8.5 : 7.2;
       for (const s of [-1, 1]) { const p = new THREE.Mesh(new THREE.BoxGeometry(1.0, H, 1.0), pillarMat); p.position.set(0, H / 2, s * (hw + 1.6)); p.castShadow = true; g.add(p); }
       const tex = mkLabel(label, a, b);
@@ -551,15 +641,20 @@ export class World {
     const chunks = new Map(); const CELL = 300; const SHOP_H = 4.3;
     const boxes = [], tanks = [], masts = [], boards = [];
     const brandB = (this.brandMats || []).map(() => new MeshBuilder());
+    const img = this.data.imagery;
     for (const b of this.buildings) {
       let pts = b.pts; if (polyArea(pts) < 0) pts = pts.slice().reverse();
+      let base = 0; if (this.hasTerrain) { base = Infinity; for (const p of pts) base = Math.min(base, this.H(p[0], p[1])); base -= 0.3; }
+      if (img && !b.roofColor) { let sx = 0, sz = 0; for (const p of pts) { sx += p[0]; sz += p[1]; } const rc0 = img.colorAt(sx / pts.length, sz / pts.length); if (rc0) { const cc0 = new THREE.Color().setRGB(rc0[0], rc0[1], rc0[2], THREE.SRGBColorSpace); b.roofColor = '#' + cc0.getHexString(); } }
+      const snapB = []; const snapLens = { boxes: boxes.length, tanks: tanks.length, masts: masts.length };
       const h = Math.max(3, b.h); const tall = h > 55; const id = (b.id | 0) >>> 0;
       const col = new THREE.Color(tall ? glassPal[id % glassPal.length] : palette[Math.floor(rnd() * palette.length)]);
       if (b.color) col.set(b.color); else col.multiplyScalar(0.88 + rnd() * 0.22);
       let cx = 0, cz = 0; for (const p of pts) { cx += p[0]; cz += p[1]; } cx /= pts.length; cz /= pts.length;
       const key = Math.floor(cx / CELL) + ',' + Math.floor(cz / CELL);
       let ch = chunks.get(key); if (!ch) { ch = { walls: {}, roof: new MeshBuilder() }; chunks.set(key, ch); }
-      const wallB = (st) => ch.walls[st] || (ch.walls[st] = new MeshBuilder());
+      const wallB = (st) => { const w = ch.walls[st] || (ch.walls[st] = new MeshBuilder()); if (!snapB.some(e => e[0] === w)) snapB.push([w, w.pos.length]); return w; };
+      snapB.push([ch.roof, ch.roof.pos.length]); for (const bb of brandB) snapB.push([bb, bb.pos.length]);
       const area = Math.abs(polyArea(pts)); const kind = b.kind || '';
       const house = /^(house|detached|semidetached_house|terrace|bungalow)$/.test(kind) || (h < 9 && area < 300);
       let style = 'punched';
@@ -645,6 +740,12 @@ export class World {
           }
         }
       } catch (e) { /* skip */ }
+      if (base) {
+        for (const [bld, from] of snapB) for (let k = from + 1; k < bld.pos.length; k += 3) bld.pos[k] += base;
+        for (let k = snapLens.boxes; k < boxes.length; k++) boxes[k].y += base;
+        for (let k = snapLens.tanks; k < tanks.length; k++) tanks[k].y += base;
+        for (let k = snapLens.masts; k < masts.length; k++) masts[k].y += base;
+      }
     }
     this.buildingMeshes = [];
     for (const ch of chunks.values()) {
@@ -703,8 +804,8 @@ export class World {
       const th = Math.atan2(c.tz[l.i], c.tx[l.i]);
       // アームが道路側を向くようにする: ローカル +X をコース側へ
       const r = [-c.tz[l.i], c.tx[l.i]]; const toRoad = [-r[0] * l.side, -r[1] * l.side]; const ang = Math.atan2(toRoad[1], toRoad[0]);
-      d.position.set(l.x, 0, l.z); d.rotation.set(0, -ang, 0); d.scale.set(1, 1, 1); d.updateMatrix(); poles.setMatrixAt(q, d.matrix); heads.setMatrixAt(q, d.matrix);
-      d.position.set(l.x + toRoad[0] * 2.4, 0.2, l.z + toRoad[1] * 2.4); d.rotation.set(0, 0, 0); d.scale.set(20, 1, 20); d.updateMatrix(); pools.setMatrixAt(q, d.matrix);
+      d.position.set(l.x, this.H(l.x, l.z), l.z); d.rotation.set(0, -ang, 0); d.scale.set(1, 1, 1); d.updateMatrix(); poles.setMatrixAt(q, d.matrix); heads.setMatrixAt(q, d.matrix);
+      d.position.set(l.x + toRoad[0] * 2.4, 0.2 + this.H(l.x + toRoad[0] * 2.4, l.z + toRoad[1] * 2.4), l.z + toRoad[1] * 2.4); d.rotation.set(0, 0, 0); d.scale.set(20, 1, 20); d.updateMatrix(); pools.setMatrixAt(q, d.matrix);
     });
     poles.count = heads.count = pools.count = lampPts.length;
     poles.castShadow = true; this.root.add(poles, heads, pools);
@@ -745,7 +846,7 @@ export class World {
       const dd = new THREE.Object3D(); const cc = new THREE.Color();
       for (const sp of species) {
         if (!sp.list.length) continue; const im = new THREE.InstancedMesh(sp.geo, treeMat, sp.list.length);
-        sp.list.forEach((t, q) => { dd.position.set(t[0], 0, t[1]); dd.rotation.set(0, rnd() * 6, 0); dd.scale.set(t[2] * (0.9 + rnd() * 0.2), t[2] * (0.85 + rnd() * 0.4), t[2] * (0.9 + rnd() * 0.2)); dd.updateMatrix(); im.setMatrixAt(q, dd.matrix); cc.setHSL(sp.hue[0] + rnd() * sp.hue[1], sp.hue[2] + rnd() * sp.hue[3], sp.hue[4] + rnd() * sp.hue[5]); im.setColorAt(q, cc); });
+        sp.list.forEach((t, q) => { dd.position.set(t[0], this.H(t[0], t[1]) - 0.1, t[1]); dd.rotation.set(0, rnd() * 6, 0); dd.scale.set(t[2] * (0.9 + rnd() * 0.2), t[2] * (0.85 + rnd() * 0.4), t[2] * (0.9 + rnd() * 0.2)); dd.updateMatrix(); im.setMatrixAt(q, dd.matrix); cc.setHSL(sp.hue[0] + rnd() * sp.hue[1], sp.hue[2] + rnd() * sp.hue[3], sp.hue[4] + rnd() * sp.hue[5]); im.setColorAt(q, cc); });
         im.castShadow = true; im.receiveShadow = true; this.root.add(im);
       }
     }
@@ -756,15 +857,15 @@ export class World {
     const c = this.course; this.landmarks = [];
     if (this.data.demo) { this.data.landmarks.forEach((l, k) => { const i = Math.floor(c.n * (0.1 + 0.19 * k)) % c.n; const side = k % 2 ? -1 : 1; l.x = c.pts[i][0] + -c.tz[i] * side * 70; l.z = c.pts[i][1] + c.tx[i] * side * 70; }); }
     const list = (this.data.landmarks || []).filter(l => c.farDist(l.x, l.z) < 260).sort((a, b) => c.farDist(a.x, a.z) - c.farDist(b.x, b.z)).slice(0, 14);
-    const beamGeo = new THREE.CylinderGeometry(1.1, 1.1, 130, 12, 1, true).translate(0, 65, 0);
+    const beamGeo = new THREE.CylinderGeometry(0.9, 0.9, 130, 12, 1, true).translate(0, 95, 0);
     const bc = new Float32Array(beamGeo.getAttribute('position').count * 3);
-    for (let i = 0; i < bc.length / 3; i++) { const y = beamGeo.getAttribute('position').getY(i) / 130; const v = 0.55 * (1 - y); bc[i * 3] = v * 0.25; bc[i * 3 + 1] = v * 0.9; bc[i * 3 + 2] = v; }
+    for (let i = 0; i < bc.length / 3; i++) { const y = (beamGeo.getAttribute('position').getY(i) - 30) / 130; const v = 0.55 * (1 - y); bc[i * 3] = v * 0.25; bc[i * 3 + 1] = v * 0.9; bc[i * 3 + 2] = v; }
     beamGeo.setAttribute('color', new THREE.BufferAttribute(bc, 3));
     const beamMat = new THREE.MeshBasicMaterial({ vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, side: THREE.DoubleSide, toneMapped: false, fog: false });
     const ringGeo = new THREE.RingGeometry(3, 4.2, 32).rotateX(-Math.PI / 2);
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x18e0ff, transparent: true, opacity: 0.8, toneMapped: false, depthWrite: false });
     for (const l of list) {
-      const g = new THREE.Group(); g.position.set(l.x, 0, l.z);
+      const g = new THREE.Group(); g.position.set(l.x, this.H(l.x, l.z), l.z);
       const beam = new THREE.Mesh(beamGeo, beamMat); g.add(beam);
       const ring = new THREE.Mesh(ringGeo, ringMat); ring.position.y = 0.3; g.add(ring);
       const cv = document.createElement('canvas'); cv.width = 512; cv.height = 112; const x = cv.getContext('2d');
@@ -773,8 +874,8 @@ export class World {
       x.fillStyle = '#fff'; x.font = '700 44px "Noto Sans JP", "Hiragino Sans", sans-serif'; x.textAlign = 'left'; x.textBaseline = 'middle';
       let name = l.name; if (name.length > 14) name = name.slice(0, 13) + '…'; x.fillText(name, 92, 58, 400);
       const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
-      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false, fog: false }));
-      sp.scale.set(66, 14.4, 1); sp.position.y = 80; sp.renderOrder = 8; g.add(sp);
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false, fog: false, sizeAttenuation: false }));
+      sp.scale.set(0.16, 0.035, 1); sp.position.y = 42; sp.renderOrder = 8; g.add(sp);
       this.root.add(g); this.landmarks.push(l);
     }
   }
@@ -812,11 +913,25 @@ export class World {
     this.sun.color.set(T.sunColor); this.sun.intensity = T.sunI;
     this.hemi.color.set(T.hemiSky); this.hemi.groundColor.set(T.hemiGround); this.hemi.intensity = T.hemiI;
     const su = this.skyUniforms; su.uTop.value.set(T.skyTop); su.uHor.value.set(T.skyHor); su.uSunDir.value.copy(this.sunDir); su.uSunCol.value.set(T.sunColor); su.uNight.value = T.night;
+    const pb = this.skyPB.material.uniforms; const dusk = T.sunElev < 15;
+    pb.sunPosition.value.copy(this.sunDir); pb.turbidity.value = T.rain ? 10 : (dusk ? 5 : 2.4); pb.rayleigh.value = T.rain ? 0.5 : (dusk ? 2.6 : 1.5);
+    pb.mieCoefficient.value = T.rain ? 0.02 : (dusk ? 0.006 : 0.004); pb.mieDirectionalG.value = dusk ? 0.85 : 0.8;
+    pb.cloudCoverage.value = T.rain ? 0.97 : (dusk ? 0.42 : 0.32); pb.cloudDensity.value = T.rain ? 0.95 : 0.5; pb.cloudElevation.value = T.rain ? 0.75 : 0.5; pb.cloudScale.value = 0.00025;
+    pb.intensity.value = (T.rain ? 0.55 : (dusk ? 1.1 : 0.85)) * (window.__SKYK || 0.3); pb.showSunDisc.value = T.rain ? 0 : 1;
+    const usePB = T.night < 0.5; this.skyPB.visible = usePB; this.sky.visible = !usePB;
+    if (T.rain && !usePB) su.uTop.value.multiplyScalar(0.6);
     scene.background = new THREE.Color(T.fog);
     scene.fog = new THREE.Fog(T.fog, T.fogNear, T.fogFar);
     this.renderer.toneMappingExposure = T.exposure;
-    this.groundMat.color.set(T.ground); this.roadMat.color.set(T.road); this.sideMat.color.set(T.side); this.sidewalkMat.color.setScalar(T.night > 0.5 ? 0.32 : (T.sunElev < 15 ? 0.7 : 1));
+    this.groundMat.color.set(T.ground); this.nearGroundMat.color.setScalar((T.night > 0.5 ? 0.22 : (T.sunElev < 15 ? 0.72 : 1)) * (this.data.imagery ? 0.72 : 1)); if (T.night > 0.5) this.nearGroundMat.color.multiply(new THREE.Color(0.7, 0.8, 1.2)); this.roadMat.color.set(T.road).multiplyScalar(this.roadMat.map ? 2.6 : 1); this.sideMat.color.set(T.side); this.sidewalkMat.color.setScalar(T.night > 0.5 ? 0.32 : (T.sunElev < 15 ? 0.7 : 1));
     this.courseMat.roughness = T.asphaltRough;
+    if (T.rain) {
+      if (!this.puddleTex) this.puddleTex = canvasTex(256, 256, (g, w, h) => { g.fillStyle = '#9a9a9a'; g.fillRect(0, 0, w, h); for (let k = 0; k < 26; k++) { const x = Math.random() * w, y = Math.random() * h, r = 10 + Math.random() * 40; const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, 'rgba(70,70,70,0.95)'); gr.addColorStop(1, 'rgba(70,70,70,0)'); g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2); } }, { repeat: true, srgb: false });
+      for (const m of [this.courseMat, this.roadMat]) { m.roughnessMap = this.puddleTex; m.roughness = 0.6; m.envMapIntensity = 0.75; m.color.multiplyScalar(0.5); m.needsUpdate = true; }
+      this.courseMat.color.setScalar(0.5); this.sidewalkMat.color.multiplyScalar(0.7); this.nearGroundMat.color.multiplyScalar(0.78);
+      this.sidewalkMat.roughness = 0.35; this.wallMat.roughness = 0.3;
+      if (!this.rain) this.makeRain();
+    }
     this.roadMat.roughness = Math.max(0.4, T.asphaltRough + 0.05);
     for (const m of this.luMats || []) m.color.set(m.userData.base).multiplyScalar(T.night > 0.5 ? 0.3 : (T.sunElev < 15 ? 0.75 : 1));
     this.parkMat.color.set(T.night > 0.5 ? 0x1c3a22 : (T.sunElev < 15 ? 0x4b5f35 : 0x4d7a3c));
@@ -834,26 +949,46 @@ export class World {
     this.makeEnvironment();
   }
 
+  makeRain() {
+    const N = this.quality === 'low' ? 3500 : 9000; const pos = new Float32Array(N * 6), end = new Float32Array(N * 2);
+    for (let i = 0; i < N; i++) { const x = Math.random() * 60 - 30, y = Math.random() * 30, z = Math.random() * 60 - 30; pos.set([x, y, z, x, y, z], i * 6); end[i * 2] = 0; end[i * 2 + 1] = 1; }
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('aEnd', new THREE.BufferAttribute(end, 1));
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uCam: { value: new THREE.Vector3() }, uTime: { value: 0 }, uWind: { value: new THREE.Vector2(1.5, 0.6) }, uCol: { value: new THREE.Color(this.T.night > 0.5 ? 0x8fa0c0 : 0xc8d2dc) } },
+      vertexShader: `attribute float aEnd; uniform vec3 uCam; uniform float uTime; uniform vec2 uWind; varying float vA;
+        void main(){ vec3 p = position; float sp = 22.0 + fract(p.x * 13.1) * 6.0; p.y = mod(p.y - uTime * sp, 30.0);
+          p.xz += uWind * (30.0 - p.y) * 0.05; p.x = mod(p.x - uCam.x, 60.0) - 30.0 + uCam.x; p.z = mod(p.z - uCam.z, 60.0) - 30.0 + uCam.z; p.y += uCam.y - 10.0;
+          p += vec3(uWind.x, -sp, uWind.y) * 0.035 * aEnd; vA = mix(0.0, 1.0, 1.0 - aEnd * 0.4);
+          gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0); }`,
+      fragmentShader: `uniform vec3 uCol; varying float vA; void main(){ gl_FragColor = vec4(uCol, 0.32 * vA); }`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    this.rain = new THREE.LineSegments(g, mat); this.rain.frustumCulled = false; this.rain.renderOrder = 9; this.root.add(this.rain);
+  }
+  updateRain(camera, time) { const u = this.rain.material.uniforms; u.uCam.value.copy(camera.position); u.uTime.value = time; }
+
   makeEnvironment() {
     if (this.envRT) this.envRT.dispose();
     const pm = new THREE.PMREMGenerator(this.renderer);
-    const sc = new THREE.Scene(); const sky = this.sky.clone(); sky.material = this.sky.material; sc.add(sky);
+    const sc = new THREE.Scene(); const src = this.skyPB.visible ? this.skyPB : this.sky; const sky = src.clone(); sky.material = src.material; sc.add(sky);
     // 地面側を少し明るく
     const gnd = new THREE.Mesh(new THREE.CircleGeometry(300, 24).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: new THREE.Color(this.T.ground).multiplyScalar(0.8 + this.T.night * -0.5) }));
     gnd.position.y = -1; sc.add(gnd);
     this.envRT = pm.fromScene(sc, 0.02); pm.dispose();
-    this.scene.environment = this.envRT.texture; this.scene.environmentIntensity = this.T.env;
+    this.scene.environment = this.envRT.texture; this.scene.environmentIntensity = this.T.env * (this.skyPB.visible ? 0.55 : 1);
   }
 
   update(dt, camera, focus, time) {
     this.skyUniforms.uTime.value = time;
     if (this.aviationMat) { const on = Math.sin(time * 3.2) > 0.2 ? 1 : 0.12; this.aviationMat.color.setRGB(2.5 * on, 0.1 * on, 0.1 * on); }
-    this.sky.position.copy(camera.position);
+    this.sky.position.copy(camera.position); this.skyPB.position.copy(camera.position); this.skyPB.material.uniforms.time.value = time;
+    if (this.rain) this.updateRain(camera, time);
+    if (this.street) updateSignals(this.street.signalMats, time);
     this.skyline.position.x = camera.position.x; this.skyline.position.z = camera.position.z;
     // 影カメラ追従
     const f = focus; const sd = this.sunDir;
-    this.sunTarget.position.set(f.x, 0, f.z);
-    this.sun.position.set(f.x + sd.x * 250, sd.y * 250, f.z + sd.z * 250);
+    const fy = f.y || 0; this.sunTarget.position.set(f.x, fy, f.z);
+    this.sun.position.set(f.x + sd.x * 250, fy + sd.y * 250, f.z + sd.z * 250);
     this.sunTarget.updateMatrixWorld();
   }
 }

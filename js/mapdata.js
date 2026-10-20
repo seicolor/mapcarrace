@@ -74,6 +74,7 @@ function coreQuery(lat, lon, r) {
   rel["natural"="water"]${a};
   rel["leisure"="park"]${a};
   node["natural"="tree"]${a};
+  node["highway"~"^(traffic_signals|crossing)$"]${a};
   nwr["name"]["tourism"~"^(attraction|museum|viewpoint|gallery|zoo|theme_park)$"]${a};
   nwr["name"]["historic"~"^(castle|monument|memorial|ruins|archaeological_site|shrine|temple|tower|city_gate)$"]${a};
   nwr["name"]["man_made"~"^(tower|lighthouse|obelisk)$"]${a};
@@ -191,7 +192,7 @@ function joinRings(segs) {
   return rings;
 }
 
-export function newData(radius) { return { roads: [], foot: [], buildings: [], water: [], parks: [], landuse: [], trees: [], landmarks: [], radius, name: '', warnings: [] }; }
+export function newData(radius) { return { roads: [], foot: [], buildings: [], water: [], parks: [], landuse: [], trees: [], signals: [], crossings: [], landmarks: [], radius, name: '', warnings: [] }; }
 
 export function parseOverpass(json, lat0, lon0, radius, data = newData(radius)) {
   const proj = makeProjector(lat0, lon0);
@@ -206,6 +207,8 @@ export function parseOverpass(json, lat0, lon0, radius, data = newData(radius)) 
     const t = el.tags || {};
     if (el.type === 'node') {
       if (t.natural === 'tree' && data.trees.length < 6000) { const p = proj(el.lat, el.lon); data.trees.push(p); }
+      if (t.highway === 'traffic_signals' && data.signals.length < 2000) data.signals.push(proj(el.lat, el.lon));
+      if (t.highway === 'crossing' && data.crossings.length < 4000) data.crossings.push(proj(el.lat, el.lon));
     }
     if (isLandmark(t)) {
       const c = centerOf(el);
@@ -255,6 +258,32 @@ export function parseOverpass(json, lat0, lon0, radius, data = newData(radius)) 
   return data;
 }
 
+// OpenStreetMap API (XML) → Overpass 形式に変換
+export function osmXmlToJson(text) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml'); const nodes = new Map(); const els = [];
+  const tagsOf = (el) => { const t = {}; for (const c of el.children) if (c.tagName === 'tag') t[c.getAttribute('k')] = c.getAttribute('v'); return t; };
+  for (const n of doc.getElementsByTagName('node')) {
+    const id = +n.getAttribute('id'), lat = +n.getAttribute('lat'), lon = +n.getAttribute('lon'); nodes.set(id, [lat, lon]);
+    if (n.children.length) { const t = tagsOf(n); if (t.natural === 'tree' || t.highway === 'traffic_signals' || t.highway === 'crossing' || t.tourism || t.historic || t.man_made) els.push({ type: 'node', id, lat, lon, tags: t }); }
+  }
+  for (const w of doc.getElementsByTagName('way')) {
+    const t = tagsOf(w); if (!(t.highway || t.building || t.natural || t.leisure || t.landuse || t.waterway || t.tourism || t.historic || t.man_made)) continue;
+    const refs = []; const geom = []; for (const c of w.children) if (c.tagName === 'nd') { const r = +c.getAttribute('ref'); const p = nodes.get(r); if (p) { refs.push(r); geom.push({ lat: p[0], lon: p[1] }); } }
+    if (geom.length > 1) els.push({ type: 'way', id: +w.getAttribute('id'), nodes: refs, tags: t, geometry: geom });
+  }
+  return { elements: els };
+}
+async function loadFromOsmApi(lat, lon, radius, onStatus) {
+  const dLat = radius / 110574, dLon = radius / (111320 * Math.cos(lat * Math.PI / 180));
+  const nx = Math.max(1, Math.ceil(2 * dLon / 0.0034)), ny = Math.max(1, Math.ceil(2 * dLat / 0.0027)); const boxes = [];
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) boxes.push([lon - dLon + 2 * dLon * i / nx, lat - dLat + 2 * dLat * j / ny, lon - dLon + 2 * dLon * (i + 1) / nx, lat - dLat + 2 * dLat * (j + 1) / ny]);
+  const seen = new Set(); const els = []; let done = 0;
+  const worker = async () => { while (boxes.length) { const b = boxes.shift(); const res = await fetchWithTimeout(`https://api.openstreetmap.org/api/0.6/map?bbox=${b.map(v => v.toFixed(6)).join(',')}`, {}, 45000); if (!res.ok) throw new Error('osm api ' + res.status);
+    const j = osmXmlToJson(await res.text()); for (const e of j.elements) { const k = e.type + e.id; if (!seen.has(k)) { seen.add(k); els.push(e); } } done++; onStatus && onStatus(`OpenStreetMap 本体から直接取得中… ${done}/${nx * ny}`); } };
+  await Promise.all([worker(), worker(), worker()]);
+  return { elements: els };
+}
+
 export async function loadPlace(lat, lon, { radius = 1300, onStatus, force = false } = {}) {
   const key = `${lat.toFixed(3)},${lon.toFixed(3)},${radius}`;
   if (!force) {
@@ -274,9 +303,21 @@ export async function loadPlace(lat, lon, { radius = 1300, onStatus, force = fal
   let core;
   try { core = await raceOverpass(coreQuery(lat, lon, radius), { onStatus, label: '道路: ', rounds: 2 }); }
   catch (e1) {
-    onStatus && onStatus('範囲を狭めて再取得中…');
-    radius = Math.round(radius * 0.65);
-    core = await raceOverpass(coreQuery(lat, lon, radius), { onStatus, label: '道路(狭域): ', rounds: 2 });
+    try {
+      onStatus && onStatus('範囲を狭めて再取得中…');
+      radius = Math.round(radius * 0.65);
+      core = await raceOverpass(coreQuery(lat, lon, radius), { onStatus, label: '道路(狭域): ', rounds: 1 });
+    } catch (e2) {
+      // 最終手段: OpenStreetMap 本体のAPIから狭い範囲を直接取得
+      onStatus && onStatus('OpenStreetMap 本体から直接取得中…');
+      radius = Math.min(radius, 520);
+      const all = await loadFromOsmApi(lat, lon, radius, onStatus);
+      const data = parseOverpass(all, lat, lon, radius); data.lat = lat; data.lon = lon;
+      data.warnings.push('地図サーバー(Overpass)が混雑しているため、狭い範囲の地図で作っています');
+      if (data.roads.length < 8) throw new Error('この場所には走れる道路がほとんどありません');
+      cachePut(key, { t: Date.now(), core: all, bld: { elements: [] } });
+      return data;
+    }
   }
   const data = parseOverpass(core, lat, lon, radius);
   data.lat = lat; data.lon = lon;
@@ -363,7 +404,9 @@ export function generateDemoCity(seed = 7) {
     }
   }
   const landmarks = [{ name: 'シティタワー', x: 250, z: -120 }, { name: 'セントラル駅', x: -180, z: 160 }, { name: 'サンセット公園', x: 60, z: 300 }, { name: 'ベイブリッジ展望台', x: -320, z: -240 }, { name: 'スカイアリーナ', x: 380, z: 210 }];
-  return { roads, foot: [], landuse: [], trees: [], warnings: [], buildings, water, parks, landmarks, radius: 1000, name: 'デモ都市（オフライン）', demo: true, lat: 0, lon: 0 };
+  const signals = [], crossings = [];
+  for (let i = 2; i < N - 2; i += 2) for (let j = 2; j < N - 2; j += 3) { signals.push(node[i][j].slice()); const a = node[i][j], b = node[i][j + 1]; crossings.push([a[0] + (b[0] - a[0]) * 0.12, a[1] + (b[1] - a[1]) * 0.12]); }
+  return { roads, foot: [], landuse: [], trees: [], signals, crossings, warnings: [], buildings, water, parks, landmarks, radius: 1000, name: 'デモ都市（オフライン）', demo: true, lat: 0, lon: 0 };
 }
 
 export const PRESETS = [

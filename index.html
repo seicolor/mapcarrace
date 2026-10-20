@@ -34,6 +34,7 @@
   <div id="poi"></div>
   <div id="msg"></div>
   <div id="wrong" class="hidden">⚠ 逆走 WRONG WAY</div>
+  <div id="credits"></div>
   <div id="hint">W/↑ アクセル　S/↓ ブレーキ　A D/←→ ハンドル　<b>Space</b> ドリフト　<b>Shift</b> ニトロ　<b>C</b> カメラ　<b>R</b> コース復帰　<b>M</b> 音</div>
 </div>
 
@@ -57,10 +58,15 @@
       <div class="field"><label>時間帯</label><div class="seg" data-key="theme"><button data-v="day" class="on">☀ 昼</button><button data-v="sunset">🌇 夕方</button><button data-v="night">🌙 夜</button></div></div>
       <div class="field"><label>周回 / ライバル</label><div class="seg" data-key="laps"><button data-v="2">2周</button><button data-v="3" class="on">3周</button><button data-v="5">5周</button></div><div class="seg" data-key="rivals" style="margin-top:6px"><button data-v="3">3台</button><button data-v="5" class="on">5台</button><button data-v="7">7台</button></div></div>
     </div>
+    <div class="grid3">
+      <div class="field"><label>天気</label><div class="seg" data-key="weather"><button data-v="clear" class="on">☀ 晴れ</button><button data-v="rain">🌧 雨</button></div></div>
+      <div class="field"><label>地面</label><div class="seg" data-key="photo"><button data-v="1" class="on">航空写真</button><button data-v="0">地図</button></div></div>
+      <div class="field"><label>画質</label><div class="seg" data-key="quality"><button data-v="high">高</button><button data-v="mid">中</button><button data-v="low">低</button></div></div>
+    </div>
     <div id="chosen">場所を選んでください</div>
     <button id="btn-map" class="btn big cyan" disabled>🗺 地図を見てコースを決める</button>
     <button id="btn-go" class="btn big" disabled>おまかせでコースを作って走る</button>
-    <div class="foot">地図データ © OpenStreetMap contributors ／ 操作: キーボード・ゲームパッド・タッチ対応</div>
+    <div class="foot">地図データ © OpenStreetMap contributors ／ 航空写真: 国土地理院・Esri ／ 標高: 国土地理院・AWS Terrain Tiles ／ 操作: キーボード・ゲームパッド・タッチ対応</div>
   </div>
 </div>
 
@@ -89,6 +95,7 @@
     <div class="pv-title" id="pv-name">—</div>
     <div class="pv-stats"><div><small>全長</small><b id="pv-len">—</b></div><div><small>コーナー</small><b id="pv-corners">—</b></div><div><small>周回</small><b id="pv-laps">—</b></div></div>
     <canvas id="pv-map" width="360" height="360"></canvas>
+    <div id="pv-credits"></div>
     <div class="row"><button id="pv-start" class="btn big">スタート！</button></div>
     <div class="row"><button id="pv-edit" class="btn ghost">🗺 地図で編集</button><button id="pv-new" class="btn ghost">別のコース</button></div>
     <div class="row"><button id="pv-back" class="btn ghost">場所を変える</button></div>

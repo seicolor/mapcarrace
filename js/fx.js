@@ -10,7 +10,7 @@ function softTex(inner = 0.0, color = '255,255,255') {
 
 const VS = `
 attribute float size; attribute vec4 pcolor; varying vec4 vC; uniform float uScale;
-void main(){ vC = pcolor; vec4 mv = modelViewMatrix * vec4(position,1.0); gl_PointSize = size * uScale / max(0.1, -mv.z); gl_Position = projectionMatrix * mv; }`;
+void main(){ vC = pcolor; vec4 mv = modelViewMatrix * vec4(position,1.0); vC.a *= smoothstep(2.5, 9.0, -mv.z); gl_PointSize = size * uScale / max(0.1, -mv.z); gl_Position = projectionMatrix * mv; }`;
 const FS = `
 uniform sampler2D map; varying vec4 vC;
 void main(){ vec4 t = texture2D(map, gl_PointCoord); gl_FragColor = vec4(vC.rgb, vC.a * t.a); if(gl_FragColor.a < 0.003) discard; }`;
@@ -69,18 +69,18 @@ export class FX {
     this.skMesh.frustumCulled = false; this.skMesh.renderOrder = 2; scene.add(this.skMesh); this.skDirty = false; this.skCount = 0;
     this.chains = new Map();
   }
-  skid(key, x, z, nx, nz, active) {
+  skid(key, x, z, nx, nz, active, y = 0.19) {
     // (nx,nz): 車の右方向。幅 0.32m のリボンを延ばす
     let c = this.chains.get(key);
     if (!active) { if (c) c.on = false; return; }
     const hw = 0.17; const lx = x - nx * hw, lz = z - nz * hw, rx = x + nx * hw, rz = z + nz * hw;
-    if (!c) { c = { on: false, lx, lz, rx, rz }; this.chains.set(key, c); }
-    if (!c.on) { c.on = true; c.lx = lx; c.lz = lz; c.rx = rx; c.rz = rz; return; }
+    if (!c) { c = { on: false, lx, lz, rx, rz, y }; this.chains.set(key, c); }
+    if (!c.on) { c.on = true; c.lx = lx; c.lz = lz; c.rx = rx; c.rz = rz; c.y = y; return; }
     const d = Math.hypot(x - (c.lx + c.rx) / 2, z - (c.lz + c.rz) / 2); if (d < 0.35) return;
-    const o = this.q * 12; const y = 0.19; const p = this.skPos;
-    p[o] = c.lx; p[o + 1] = y; p[o + 2] = c.lz; p[o + 3] = c.rx; p[o + 4] = y; p[o + 5] = c.rz; p[o + 6] = lx; p[o + 7] = y; p[o + 8] = lz; p[o + 9] = rx; p[o + 10] = y; p[o + 11] = rz;
+    const o = this.q * 12; const p = this.skPos;
+    p[o] = c.lx; p[o + 1] = c.y; p[o + 2] = c.lz; p[o + 3] = c.rx; p[o + 4] = c.y; p[o + 5] = c.rz; p[o + 6] = lx; p[o + 7] = y; p[o + 8] = lz; p[o + 9] = rx; p[o + 10] = y; p[o + 11] = rz;
     this.q = (this.q + 1) % this.maxQ; this.skCount = Math.min(this.maxQ, this.skCount + 1); this.skDirty = true;
-    c.lx = lx; c.lz = lz; c.rx = rx; c.rz = rz;
+    c.lx = lx; c.lz = lz; c.rx = rx; c.rz = rz; c.y = y;
   }
   update(dt, viewH) {
     this.smoke.update(dt, viewH); this.sparks.update(dt, viewH); this.dust.update(dt, viewH);

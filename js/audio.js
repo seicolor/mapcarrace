@@ -26,7 +26,9 @@ export class GameAudio {
     this.squeal.connect(this.sqF).connect(this.sqG).connect(this.bus);
     this.boostN = mkNoise(); this.bF = ctx.createBiquadFilter(); this.bF.type = 'highpass'; this.bF.frequency.value = 1500; this.bG = ctx.createGain(); this.bG.gain.value = 0;
     this.boostN.connect(this.bF).connect(this.bG).connect(this.bus);
-    [this.o1, this.o2, this.o3, this.wind, this.squeal, this.boostN].forEach(n => n.start());
+    this.rainN = mkNoise(); this.rF = ctx.createBiquadFilter(); this.rF.type = 'highpass'; this.rF.frequency.value = 900; this.rG = ctx.createGain(); this.rG.gain.value = 0;
+    this.rainN.connect(this.rF).connect(this.rG).connect(this.bus);
+    [this.o1, this.o2, this.o3, this.wind, this.squeal, this.boostN, this.rainN].forEach(n => n.start());
   }
   setMuted(m) { this.muted = m; if (this.master) this.master.gain.value = m ? 0 : 0.55; }
   engine(rpm, throttle, speed, slip, boosting) {
@@ -38,8 +40,9 @@ export class GameAudio {
     this.windG.gain.setTargetAtTime(Math.min(0.28, speed / 90 * 0.28), t, 0.1); this.windF.frequency.setTargetAtTime(300 + speed * 12, t, 0.1);
     this.sqG.gain.setTargetAtTime(Math.max(0, Math.min(0.2, (slip - 3.5) * 0.04)), t, 0.04); this.sqF.frequency.setTargetAtTime(1400 + slip * 70, t, 0.05);
     this.bG.gain.setTargetAtTime(boosting ? 0.12 : 0, t, 0.05);
+    this.rG.gain.setTargetAtTime((this.rainLevel || 0) * 0.07, t, 0.3);
   }
-  silence() { if (!this.ctx) return; const t = this.ctx.currentTime; this.eg.gain.setTargetAtTime(0, t, 0.1); this.windG.gain.setTargetAtTime(0, t, 0.1); this.sqG.gain.setTargetAtTime(0, t, 0.1); this.bG.gain.setTargetAtTime(0, t, 0.1); }
+  silence() { if (!this.ctx) return; const t = this.ctx.currentTime; this.eg.gain.setTargetAtTime(0, t, 0.1); this.windG.gain.setTargetAtTime(0, t, 0.1); this.sqG.gain.setTargetAtTime(0, t, 0.1); this.bG.gain.setTargetAtTime(0, t, 0.1); if (this.rG) this.rG.gain.setTargetAtTime(0, t, 0.1); }
   beep(freq = 440, dur = 0.18, vol = 0.3, type = 'sine') {
     if (!this.ctx) return; const ctx = this.ctx; const o = ctx.createOscillator(); const g = ctx.createGain(); o.type = type; o.frequency.value = freq;
     g.gain.setValueAtTime(0, ctx.currentTime); g.gain.linearRampToValueAtTime(vol, ctx.currentTime + 0.01); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);

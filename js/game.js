@@ -4,9 +4,11 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { PRESETS, geocode, loadPlace, generateDemoCity, ROAD_WIDTH } from './mapdata.js';
 import { generateCourse, mulberry32, buildGraph, snapTrace, courseFromNodePath, makeCourse } from './course.js';
 import { MapEditor } from './editor.js';
+import { loadTerrain, loadImagery } from './terrain.js';
 import { World, THEMES } from './world.js';
 import { Car, CAR_COLORS, CAR_PARAMS, CAR_VARIANTS } from './car.js';
 import { FX } from './fx.js';
@@ -22,27 +24,51 @@ const RIVAL_NAMES = ['SAKURA', 'VIPER', 'NOVA', 'DRIFTER', 'GHOST', 'TURBO', 'BL
 // 最終ポストプロセス: 速度ブラー + 色収差 + ビネット + グレイン
 // ------------------------------------------------------------------
 const FinalShader = {
-  uniforms: { tDiffuse: { value: null }, uBlur: { value: 0 }, uTime: { value: 0 }, uVig: { value: 0.35 }, uAspect: { value: 1 } },
+  uniforms: {
+    tDiffuse: { value: null }, uBlur: { value: 0 }, uTime: { value: 0 }, uVig: { value: 0.35 }, uAspect: { value: 1 },
+    uSun: { value: new THREE.Vector2(-9, -9) }, uSunOn: { value: 0 }, uSunCol: { value: new THREE.Color(1, 0.9, 0.75) },
+    uSat: { value: 1.1 }, uCon: { value: 1.05 }, uTint: { value: new THREE.Color(1, 1, 1) }, uRain: { value: 0 },
+  },
   vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
   fragmentShader: `
-    uniform sampler2D tDiffuse; uniform float uBlur, uTime, uVig, uAspect; varying vec2 vUv;
+    uniform sampler2D tDiffuse; uniform float uBlur, uTime, uVig, uAspect, uSunOn, uSat, uCon, uRain; uniform vec2 uSun; uniform vec3 uSunCol, uTint; varying vec2 vUv;
     float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+    float luma(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
     void main(){
       vec2 c = vUv - vec2(0.5, 0.46); float r = length(c * vec2(uAspect, 1.0));
-      float amt = uBlur * smoothstep(0.12, 0.75, r);
-      if (uBlur < 0.015) { vec3 c0 = texture2D(tDiffuse, vUv).rgb; c0 *= 1.0 - uVig * smoothstep(0.35, 1.05, r * 1.15); c0 += (hash(vUv * 1000.0 + uTime) - 0.5) * 0.012; gl_FragColor = vec4(c0, 1.0); return; }
-      vec3 col = vec3(0.0); float wsum = 0.0;
-      for (int i = 0; i < 9; i++) {
-        float t = float(i) / 8.0; vec2 o = c * amt * 0.22 * t;
-        float w = 1.0 - t * 0.55;
-        vec2 uv = vUv - o;
-        float ca = 0.0035 * (0.3 + uBlur * 2.2) * r;
-        col += vec3(texture2D(tDiffuse, uv + c * ca).r, texture2D(tDiffuse, uv).g, texture2D(tDiffuse, uv - c * ca).b) * w; wsum += w;
+      vec3 col;
+      if (uBlur < 0.015) col = texture2D(tDiffuse, vUv).rgb;
+      else {
+        float amt = uBlur * smoothstep(0.12, 0.75, r); col = vec3(0.0); float wsum = 0.0;
+        for (int i = 0; i < 9; i++) {
+          float t = float(i) / 8.0; vec2 o = c * amt * 0.22 * t; float w = 1.0 - t * 0.55; vec2 uv = vUv - o;
+          float ca = 0.0035 * (0.3 + uBlur * 2.2) * r;
+          col += vec3(texture2D(tDiffuse, uv + c * ca).r, texture2D(tDiffuse, uv).g, texture2D(tDiffuse, uv - c * ca).b) * w; wsum += w;
+        }
+        col /= wsum;
       }
-      col /= wsum;
+      // レンズフレア(太陽が見えている時だけ)
+      if (uSunOn > 0.0 && uSun.x > -0.3 && uSun.x < 1.3 && uSun.y > -0.3 && uSun.y < 1.3) {
+        float vis = 0.0;
+        for (int k = 0; k < 5; k++) { vec2 o = vec2(float(k - 2) * 0.006, float((k * 3) % 5 - 2) * 0.006); vec2 sp = clamp(uSun + o, 0.001, 0.999); vis += smoothstep(0.86, 0.98, luma(texture2D(tDiffuse, sp).rgb)); }
+        vis = vis / 5.0 * uSunOn;
+        if (uSun.x < 0.0 || uSun.x > 1.0 || uSun.y < 0.0 || uSun.y > 1.0) vis *= 0.5;
+        vec2 d = (vUv - uSun) * vec2(uAspect, 1.0); float dl = length(d);
+        vec3 fl = uSunCol * (exp(-dl * 24.0) * 0.14 + exp(-abs(d.y) * 220.0) * exp(-abs(d.x) * 3.0) * 0.09);
+        vec2 axis = vec2(0.5) - uSun;
+        for (int g = 1; g <= 5; g++) {
+          float fg = float(g); vec2 gp = uSun + axis * (0.38 * fg); float gr = 0.02 + 0.018 * fg; float gd = length((vUv - gp) * vec2(uAspect, 1.0));
+          vec3 tint = vec3(0.5 + 0.5 * sin(fg * 1.7), 0.5 + 0.5 * sin(fg * 1.7 + 2.0), 0.5 + 0.5 * sin(fg * 1.7 + 4.0));
+          fl += tint * smoothstep(gr, gr * 0.65, gd) * 0.03;
+        }
+        float ring = smoothstep(0.015, 0.0, abs(dl - 0.42)) * 0.012; fl += vec3(0.6, 0.8, 1.0) * ring;
+        col += fl * vis;
+      }
+      // カラーグレーディング
+      float L = luma(col); col = mix(vec3(L), col, uSat); col = (col - 0.5) * uCon + 0.5; col *= uTint;
       col *= 1.0 - uVig * smoothstep(0.35, 1.05, r * 1.15);
       col += (hash(vUv * 1000.0 + uTime) - 0.5) * 0.012;
-      gl_FragColor = vec4(col, 1.0);
+      gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
     }`,
 };
 
@@ -58,11 +84,11 @@ class Game {
     this.setupComposer();
     this.audio = new GameAudio();
     this.state = 'menu'; this.keys = new Set(); this.touch = {}; this.time = 0; this.camMode = 0; this.paused = false;
-    this.opts = { len: 2500, theme: 'day', laps: 3, rivals: 5 };
+    this.opts = { len: 2500, theme: 'day', laps: 3, rivals: 5, weather: 'clear', photo: 1, quality: this.defaultQuality() };
     this.place = null; this.seed = 1; this.cars = []; this.world = null; this.camYaw = 0; this.camPos = new THREE.Vector3(0, 50, 0); this.camTrans = 0;
     this.shake = 0; this.raceTime = 0; this.msgTimer = 0;
     this.gaugeCtx = $('gauge').getContext('2d'); this.mapCtx = $('minimap').getContext('2d');
-    this.bindUI(); this.bindInput();
+    this.bindUI(); this.bindInput(); this.syncSeg();
     window.addEventListener('resize', () => this.resize()); this.resize();
     this.last = performance.now(); requestAnimationFrame((t) => this.frame(t));
     // URLパラメータ（デバッグ・共有用）
@@ -70,26 +96,44 @@ class Game {
     if (sp.get('theme') && THEMES[sp.get('theme')]) { this.opts.theme = sp.get('theme'); this.syncSeg(); }
     if (sp.get('len')) { this.opts.len = +sp.get('len'); this.syncSeg(); }
     if (sp.get('laps')) { this.opts.laps = +sp.get('laps'); this.syncSeg(); }
+    for (const k of ['weather', 'quality']) if (sp.get(k)) { this.opts[k] = sp.get(k); this.syncSeg(); }
+    if (sp.get('photo')) { this.opts.photo = +sp.get('photo'); this.syncSeg(); }
     if (sp.get('demo')) this.setPlace({ name: 'デモ都市（オフライン）', demo: true });
     else if (sp.get('lat') && sp.get('lon')) this.setPlace({ name: sp.get('name') || `${sp.get('lat')}, ${sp.get('lon')}`, lat: +sp.get('lat'), lon: +sp.get('lon') });
     if (sp.get('auto') && this.place) this.startLoading(false, sp.get('editor') ? 'editor' : 'auto');
     else setTimeout(() => this.buildBackdrop(), 50);
   }
 
+  applyQuality() {
+    const q = this.opts.quality; const r = this.renderer; const dpr = window.devicePixelRatio || 1;
+    r.setPixelRatio(Math.min(dpr, q === 'high' ? 2 : (q === 'mid' ? 1.5 : 1)));
+    this.gtao.enabled = q === 'high';
+    const sz = q === 'high' ? 4096 : (q === 'mid' ? 2048 : 1024); const sun = this.world && this.world.sun;
+    if (sun) { if (sun.shadow.mapSize.x !== sz) { sun.shadow.mapSize.set(sz, sz); if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; } } const S = q === 'high' ? 130 : 90; const c = sun.shadow.camera; c.left = -S; c.right = S; c.top = S; c.bottom = -S; c.updateProjectionMatrix(); }
+    this.resize();
+  }
+  defaultQuality() {
+    const mobile = matchMedia('(pointer:coarse)').matches || Math.min(screen.width, screen.height) < 700;
+    return mobile ? 'low' : 'high';
+  }
   setupComposer() {
     const r = this.renderer; const size = r.getSize(new THREE.Vector2());
     const rt = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: 4 });
     this.composer = new EffectComposer(r, rt);
     this.renderPass = new RenderPass(this.scene, this.camera);
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.4, 0.55, 0.88);
+    this.gtao = new GTAOPass(this.scene, this.camera, size.x, size.y);
+    this.gtao.updateGtaoMaterial({ radius: 1.8, distanceExponent: 1.3, thickness: 1.5, scale: 1.15, samples: 12, distanceFallOff: 1.0 });
+    this.gtao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 12 });
+    this.gtao.blendIntensity = 0.9;
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.4, 0.5, 1.0);
     this.finalPass = new ShaderPass(FinalShader);
     this.outPass = new OutputPass();
-    this.composer.addPass(this.renderPass); this.composer.addPass(this.bloom); this.composer.addPass(this.finalPass); this.composer.addPass(this.outPass);
+    this.composer.addPass(this.renderPass); this.composer.addPass(this.gtao); this.composer.addPass(this.bloom); this.composer.addPass(this.outPass); this.composer.addPass(this.finalPass);
   }
 
   resize() {
     const w = window.innerWidth, h = window.innerHeight;
-    this.renderer.setSize(w, h, false); this.composer.setSize(w, h); this.bloom.setSize(w, h);
+    this.renderer.setSize(w, h, false); this.composer.setSize(w, h);
     this.camera.aspect = w / h; this.camera.updateProjectionMatrix(); this.finalPass.uniforms.uAspect.value = w / h;
     this.viewH = h * this.renderer.getPixelRatio();
   }
@@ -102,7 +146,7 @@ class Game {
     const demo = document.createElement('button'); demo.textContent = '🧪 デモ都市(オフライン)'; demo.onclick = () => this.setPlace({ name: 'デモ都市（オフライン）', demo: true }); pr.appendChild(demo);
     // セグメント
     document.querySelectorAll('.seg').forEach(seg => seg.querySelectorAll('button').forEach(b => b.onclick = () => {
-      const k = seg.dataset.key; let v = b.dataset.v; if (k !== 'theme') v = +v; this.opts[k] = v; this.syncSeg();
+      const k = seg.dataset.key; let v = b.dataset.v; if (!['theme', 'weather', 'quality'].includes(k)) v = +v; this.opts[k] = v; this.syncSeg();
     }));
     $('btn-search').onclick = () => this.search(); $('q').addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') this.search(); });
     $('btn-geo').onclick = () => {
@@ -196,6 +240,7 @@ class Game {
         this.forceReload = false;
         data._placeKey = this.placeKey(); this.data = data; this.graph = null; this.fallbackNote = '';
       }
+      await this.loadEnvironment();
       if (!this.graph) this.graph = buildGraph(this.data.roads, true);
       this.setProgress(0.35, `道路 ${this.data.roads.length} 本 / 建物 ${this.data.buildings.length} 棟を解析中…`); await this.nextFrame();
       const course = generateCourse(this.data, { lengthTarget: this.opts.len, seed: this.seed });
@@ -208,6 +253,24 @@ class Game {
     } catch (e) {
       console.error(e); this.showLoadError(e);
     }
+  }
+  async loadEnvironment() {
+    const d = this.data;
+    if (this.place.demo) {
+      if (!d.terrain) d.terrain = { h: (x, z) => 16 * Math.sin(x / 270 + 0.4) * Math.cos(z / 330) + 7 * Math.sin((x - z) / 160), source: 'デモ地形' };
+      return;
+    }
+    const jobs = [];
+    if (!d.terrainTried) { d.terrainTried = true; jobs.push(loadTerrain(d.lat, d.lon, d.radius, { onStatus: (m) => this.setProgress(0.25, m) }).then(t => { d.terrain = t; }).catch(() => {})); }
+    if (this.opts.photo && !d.imageryTried) { d.imageryTried = true; jobs.push(loadImagery(d.lat, d.lon, d.radius, { onStatus: (m) => this.setProgress(0.3, m) }).then(im => { d.imagery = im; }).catch(() => {})); }
+    await Promise.all(jobs);
+    if (!this.opts.photo) d.imageryOff = true;
+  }
+  updateCredits() {
+    const d = this.data; const parts = ['© OpenStreetMap contributors'];
+    if (this.opts.photo && d.imagery) parts.push(d.imagery.credit);
+    if (d.terrain && d.terrain.source && !this.place.demo) parts.push('標高: ' + d.terrain.source);
+    const t = parts.join(' ／ '); const el = $('credits'); if (el) el.textContent = t; const pv = $('pv-credits'); if (pv) pv.textContent = t;
   }
   showLoadError(e) {
     const m = String((e && e.message) || e);
@@ -287,9 +350,19 @@ class Game {
     this.scene = new THREE.Scene(); this.renderPass.scene = this.scene;
     const course = this.course; const o = this.opts;
     const placeName = ((this.place && this.place.name) || 'WORLD GP').split(/[,（(]/)[0].trim();
-    this.world = new World(this.renderer, this.scene, this.data, course, { theme: o.theme, placeName });
-    this.fx = new FX(this.scene); this.T = THEMES[o.theme];
+    const keepImg = this.data.imagery; if (!o.photo) this.data.imagery = null;
+    this.world = new World(this.renderer, this.scene, this.data, course, { theme: o.theme, placeName, weather: o.weather, quality: o.quality });
+    this.data.imagery = keepImg; this.updateCredits();
+    this.fx = new FX(this.scene); this.T = this.world.T;
     this.bloom.strength = this.world.bloomStrength; this.finalPass.uniforms.uVig.value = o.theme === 'night' ? 0.5 : 0.32;
+    this.gtao.scene = this.scene;  this.applyQuality();
+    const fu = this.finalPass.uniforms; const T = this.T;
+    if (T.rain) { fu.uSat.value = 0.86; fu.uCon.value = 1.04; fu.uTint.value.setRGB(0.95, 1.0, 1.05); }
+    else if (T.night > 0.5) { fu.uSat.value = 1.12; fu.uCon.value = 1.08; fu.uTint.value.setRGB(0.93, 0.98, 1.08); }
+    else if (T.sunElev < 15) { fu.uSat.value = 1.16; fu.uCon.value = 1.07; fu.uTint.value.setRGB(1.05, 0.98, 0.9); }
+    else { fu.uSat.value = 1.1; fu.uCon.value = 1.06; fu.uTint.value.setRGB(1.0, 1.0, 1.0); }
+    fu.uRain.value = T.rain ? 1 : 0; fu.uSunOn.value = (T.night < 0.5 && !T.rain) ? 1 : 0; fu.uSunCol.value.set(T.sunColor);
+    this.audio.rainLevel = T.rain ? 1 : 0;
     // 車
     this.cars = []; const n = o.rivals + 1; const rnd = mulberry32(this.seed + 5);
     const colors = CAR_COLORS.slice(1).sort(() => rnd() - 0.5);
@@ -303,7 +376,8 @@ class Game {
     this.cars = [...rivals, player];
     for (const c of this.cars) { this.scene.add(c.model.group); c.nightLights = this.T.night > 0.1; }
     // AIの目標速度プロファイル
-    this.profiles = rivals.map(c => course.speedProfile(17.5 * c.skill, 30, 74 * Math.min(1.04, c.skill)));
+    const wetK = this.T.rain ? 0.84 : 1; for (const c of this.cars) c.gripMul = wetK;
+    this.profiles = rivals.map(c => course.speedProfile(17.5 * c.skill * wetK, 30 * wetK, 74 * Math.min(1.04, c.skill)));
     this.playerProfile = course.speedProfile(15, 28, 60);
     // ヘッドライト
     this.headlights = [];
@@ -322,6 +396,14 @@ class Game {
     }
     const fill = new THREE.PointLight(0xbcd2ff, 0, 40, 1.6); fill.position.set(-7, 5, 0); player.model.group.add(fill); this.fillLight = fill;
     for (const c of this.cars) { const pm = c.model.paint; if (this.T.night > 0.5) { pm.envMapIntensity = 3.2; pm.metalness = 0.3; pm.roughness = 0.35; pm.emissive.set(c.color).multiplyScalar(0.09); } else pm.envMapIntensity = 1.3; }
+    // 自車のボディに街並みを映り込ませる(動的キューブマップ)
+    if (this.cubeRT) { this.cubeRT.dispose(); this.cubeRT = null; }
+    if (o.quality !== 'low') {
+      this.cubeRT = new THREE.WebGLCubeRenderTarget(o.quality === 'high' ? 256 : 128, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
+      this.cubeCam = new THREE.CubeCamera(0.6, 900, this.cubeRT); this.scene.add(this.cubeCam);
+      player.model.paint.envMap = this.cubeRT.texture; player.model.paint.envMapIntensity = this.T.night > 0.5 ? 1.8 : 0.75; player.model.paint.needsUpdate = true;
+      this.cubeFrame = 0;
+    } else this.cubeCam = null;
     this.buildPads();
     this.buildMinimapBase();
     this.cacheCourseStats(); this.poiSeen = new Set();
@@ -395,7 +477,7 @@ class Game {
       if (car.ai) { car.ai.baseLane = side * 3; car.ai.lane = side * hw * 0.5; car.ai.pace = 1; }
       car.offset = side * hw * 0.5; car.wrongWay = 0; car.autopilot = false;
     });
-    for (const car of all) car.applyVisual(0.016, 0);
+    for (const car of all) { this.groundCar(car); car.applyVisual(0.016, 0); }
   }
 
   // ---------------------------------------------------------------- 状態遷移
@@ -412,7 +494,7 @@ class Game {
   applyNight() {
     const night = this.T.night; const on = night > 0.1;
     for (const h of this.headlights) h.intensity = 0; this.underLight.intensity = 0;
-    this.headOn = night > 0.3;
+    this.headOn = night > 0.3 || !!this.T.rain;
   }
   beginCountdown() {
     this.show('preview', false); this.show('hud', true); this.show('touch', this.isTouch);
@@ -473,6 +555,8 @@ class Game {
     if (this.world) {
       this.stepGame(dt);
       this.updateCamera(dt);
+      if (this.world && this.finalPass.uniforms.uSunOn.value > 0) { const sp = this.world.sunDir.clone().multiplyScalar(3000).add(this.camera.position).project(this.camera); const fu = this.finalPass.uniforms.uSun.value; if (sp.z < 1) fu.set(sp.x * 0.5 + 0.5, sp.y * 0.5 + 0.5); else fu.set(-9, -9); }
+      if (this.cubeCam && this.player && this.state !== 'menu') { const every = this.opts.quality === 'high' ? 2 : 5; if ((this.cubeFrame++ % every) === 0) { const p = this.player; this.cubeCam.position.set(p.x, (p.y || 0) + 1.1, p.z); p.model.group.visible = false; this.cubeCam.update(this.renderer, this.scene); p.model.group.visible = true; } }
       this.world.update(dt, this.camera, this.focusPoint(), this.time);
       if (this.padTex) this.padTex.offset.y -= dt * 1.4;
       this.fx.update(this.paused ? 0 : dt, this.viewH);
@@ -524,6 +608,7 @@ class Game {
         const hit = c.collideWalls(h);
         if (hit > 0.5) { c.hitFlash = 0.25; this.onHit(c, hit); if (c.isPlayer) playerHit = Math.max(playerHit, hit); }
         c.updateProgress();
+        this.groundCar(c);
       }
       this.carCollisions();
     }
@@ -550,6 +635,14 @@ class Game {
     this.hudUpdate(inp);
   }
 
+  groundCar(c) {
+    const H = this.world.H; const fx = Math.cos(c.heading), fz = Math.sin(c.heading);
+    const y = H(c.x, c.z); c.y = y;
+    if (this.world.hasTerrain) {
+      c.grade = (H(c.x + fx * 2, c.z + fz * 2) - H(c.x - fx * 2, c.z - fz * 2)) / 4;
+      c.bank = (H(c.x - fz * 1, c.z + fx * 1) - H(c.x + fz * 1, c.z - fx * 1)) / 2;
+    } else { c.grade = 0; c.bank = 0; }
+  }
   carCollisions() {
     const cs = this.cars;
     for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) {
@@ -562,15 +655,15 @@ class Game {
           nx /= d; nz /= d; const pen = (R - d) / 2; a.x -= nx * pen * 0.5; a.z -= nz * pen * 0.5; b.x += nx * pen * 0.5; b.z += nz * pen * 0.5;
           const rv = (b.vx - a.vx) * nx + (b.vz - a.vz) * nz;
           if (rv < 0) { const j2 = -(1 + 0.25) * rv / 2; a.vx -= nx * j2; a.vz -= nz * j2; b.vx += nx * j2; b.vz += nz * j2;
-            if (-rv > 2.5) { if (a.isPlayer || b.isPlayer) { this.audio.thud(Math.min(1.2, -rv / 12)); this.shake = Math.min(1, this.shake + -rv * 0.03); } this.spark((ax + bx) / 2, (az + bz) / 2, 6); } }
+            if (-rv > 2.5) { if (a.isPlayer || b.isPlayer) { this.audio.thud(Math.min(1.2, -rv / 12)); this.shake = Math.min(1, this.shake + -rv * 0.03); } this.spark((ax + bx) / 2, (az + bz) / 2, 6, a.y); } }
         }
       }
     }
   }
-  spark(x, z, n) { for (let i = 0; i < n; i++) { const a = Math.random() * 6.28, s = 3 + Math.random() * 7; this.fx.sparks.emit(x, 0.5 + Math.random() * 0.5, z, Math.cos(a) * s, 2 + Math.random() * 4, Math.sin(a) * s, 0.35 + Math.random() * 0.35, 0.5, 0.15, 1, 0.8, 0.4, 1, 14, 0.97); } }
+  spark(x, z, n, y = 0) { for (let i = 0; i < n; i++) { const a = Math.random() * 6.28, s = 3 + Math.random() * 7; this.fx.sparks.emit(x, (y || 0) + 0.5 + Math.random() * 0.5, z, Math.cos(a) * s, 2 + Math.random() * 4, Math.sin(a) * s, 0.35 + Math.random() * 0.35, 0.5, 0.15, 1, 0.8, 0.4, 1, 14, 0.97); } }
   onHit(c, v) {
     const f = [Math.cos(c.heading), Math.sin(c.heading)];
-    this.spark(c.x + f[0] * 1.2, c.z + f[1] * 1.2, Math.min(24, 4 + Math.round(v * 1.5)));
+    this.spark(c.x + f[0] * 1.2, c.z + f[1] * 1.2, Math.min(24, 4 + Math.round(v * 1.5)), c.y);
     if (c.isPlayer && (this.time - (c.lastHit || 0)) > 0.12) { this.audio.thud(Math.min(1.3, v / 12)); } c.lastHit = this.time;
   }
   onPlayerFinish() {
@@ -584,19 +677,23 @@ class Game {
       const sliding = c.slip > 3.6 || (c.handbrake && c.speed > 8) || braking;
       for (const s of [-1, 1]) {
         const wx = c.x - fx * 1.35 + rx * s * 0.92, wz = c.z - fz * 1.35 + rz * s * 0.92;
-        this.fx.skid(c.model.group.id * 2 + (s > 0 ? 1 : 0), wx, wz, rx, rz, sliding && c.speed > 4);
+        this.fx.skid(c.model.group.id * 2 + (s > 0 ? 1 : 0), wx, wz, rx, rz, sliding && c.speed > 4, (c.y || 0) + 0.19);
         if (sliding && c.speed > 5 && Math.random() < Math.min(1, dt * 70)) {
           const a = 0.1 + Math.min(0.14, c.slip * 0.012);
-          this.fx.smoke.emit(wx, 0.3, wz, c.vx * 0.12 + (Math.random() - 0.5) * 1.2, 0.8 + Math.random() * 0.8, c.vz * 0.12 + (Math.random() - 0.5) * 1.2, 1.1 + Math.random() * 0.8, 0.6, 3.2, smokeBright, smokeBright, smokeBright * 1.02, a, 0, 0.985);
+          this.fx.smoke.emit(wx, (c.y || 0) + 0.3, wz, c.vx * 0.12 + (Math.random() - 0.5) * 1.2, 0.8 + Math.random() * 0.8, c.vz * 0.12 + (Math.random() - 0.5) * 1.2, 1.1 + Math.random() * 0.8, 0.6, 3.2, smokeBright, smokeBright, smokeBright * 1.02, a, 0, 0.985);
         }
       }
+      if (this.T.rain && c.speed > 10 && Math.random() < Math.min(1, dt * c.speed * 0.9)) {
+        for (const s of [-1, 1]) { const wx = c.x - fx * 1.6 + rx * s * 0.9, wz = c.z - fz * 1.6 + rz * s * 0.9; const b = this.T.night > 0.5 ? 0.12 : 0.6;
+          this.fx.smoke.emit(wx, (c.y || 0) + 0.35, wz, -fx * c.speed * 0.12 + (Math.random() - 0.5) * 2, 0.6 + Math.random() * 1.2, -fz * c.speed * 0.12 + (Math.random() - 0.5) * 2, 0.6 + Math.random() * 0.4, 0.7, 2.6 + c.speed * 0.02, b, b, b * 1.04, 0.025 + Math.min(0.05, c.speed / 1500), 0, 0.97); }
+      }
       if (c.boosting && Math.random() < dt * 90) {
-        for (const s of [-1, 1]) this.fx.dust.emit(c.x - fx * 2.8 + rx * s * 0.45, 0.45, c.z - fz * 2.8 + rz * s * 0.45, -fx * 9 + (Math.random() - 0.5), 0.2, -fz * 9 + (Math.random() - 0.5), 0.3, 0.45, 0.05, 0.4, 0.75, 1, 0.55, 0, 0.96);
+        for (const s of [-1, 1]) this.fx.dust.emit(c.x - fx * 2.8 + rx * s * 0.45, (c.y || 0) + 0.45, c.z - fz * 2.8 + rz * s * 0.45, -fx * 9 + (Math.random() - 0.5), 0.2, -fz * 9 + (Math.random() - 0.5), 0.3, 0.45, 0.05, 0.4, 0.75, 1, 0.55, 0, 0.96);
       }
     }
     const p = this.player;
-    for (const s of this.headlights) s.intensity = this.headOn ? 1000 : 0;
-    this.underLight.intensity = 0; this.fillLight.intensity = this.headOn ? 650 : 0;
+    for (const s of this.headlights) s.intensity = this.headOn ? (this.T.rain ? 170 : 1000) : 0;
+    this.underLight.intensity = 0; this.fillLight.intensity = this.headOn && !this.T.rain ? 650 : 0;
   }
 
   // ---------------------------------------------------------------- カメラ
@@ -606,8 +703,8 @@ class Game {
       // 俯瞰オービット
       if (!this.mm) { cam.position.set(0, 300, 300); cam.lookAt(0, 0, 0); return; }
       this.previewT = (this.previewT || 0) + dt; const R = this.mm.cr * 1.05 + 90; const ang = this.previewT * 0.07 + 0.6;
-      const menuView = st === 'menu' || st === 'loading'; const tgt = new THREE.Vector3(this.mm.cx, menuView ? 25 : 0, this.mm.cz);
-      const pos = menuView ? new THREE.Vector3(tgt.x + Math.cos(ang) * R * 0.75, 70 + R * 0.12, tgt.z + Math.sin(ang) * R * 0.75) : new THREE.Vector3(tgt.x + Math.cos(ang) * R * 0.6, R * 1.05, tgt.z + Math.sin(ang) * R * 0.6);
+      const menuView = st === 'menu' || st === 'loading'; const gy = this.world ? this.world.H(this.mm.cx, this.mm.cz) : 0; const tgt = new THREE.Vector3(this.mm.cx, (menuView ? 25 : 0) + gy, this.mm.cz);
+      const pos = menuView ? new THREE.Vector3(tgt.x + Math.cos(ang) * R * 0.75, gy + 70 + R * 0.12, tgt.z + Math.sin(ang) * R * 0.75) : new THREE.Vector3(tgt.x + Math.cos(ang) * R * 0.6, gy + R * 1.05, tgt.z + Math.sin(ang) * R * 0.6);
       this.camPos.lerp(pos, 1 - Math.exp(-dt * 2.5)); cam.position.copy(this.camPos); cam.lookAt(tgt); cam.fov += ((menuView ? 62 : 50) - cam.fov) * Math.min(1, dt * 3); cam.updateProjectionMatrix();
       this.finalPass.uniforms.uBlur.value *= 0.9; this.audio.engine(900, 0, 0, 0, false); this.audio.silence();
       return;
@@ -620,9 +717,9 @@ class Game {
     const mode = this.camMode; const dist = mode === 0 ? 7.4 + vr * 2.4 : 12.5 + vr * 3; const hgt = mode === 0 ? 2.45 + vr * 0.2 : 4.6; const look = mode === 0 ? 7 : 6;
     let desired, lookAt; const k = this.camTrans > 0 ? 2.4 : (mode === 2 ? 40 : 11); if (this.camTrans > 0) this.camTrans -= dt;
     if (mode === 2) {
-      desired = new THREE.Vector3(p.x + fx * 1.9, 0.78, p.z + fz * 1.9); lookAt = new THREE.Vector3(p.x + dx * 40, 0.65, p.z + dz * 40);
+      const py = p.y || 0; desired = new THREE.Vector3(p.x + fx * 1.9, py + 0.78, p.z + fz * 1.9); lookAt = new THREE.Vector3(p.x + dx * 40, this.world.H(p.x + dx * 40, p.z + dz * 40) + 0.65, p.z + dz * 40);
     } else {
-      desired = new THREE.Vector3(p.x - dx * dist, 0.14 + hgt, p.z - dz * dist); lookAt = new THREE.Vector3(p.x + dx * look, 1.15, p.z + dz * look);
+      const py = p.y || 0; const by = Math.max(py, this.world.H(p.x - dx * dist, p.z - dz * dist)); desired = new THREE.Vector3(p.x - dx * dist, by + 0.14 + hgt, p.z - dz * dist); lookAt = new THREE.Vector3(p.x + dx * look, py + 1.15, p.z + dz * look);
     }
     this.camPos.lerp(desired, 1 - Math.exp(-dt * k)); cam.position.copy(this.camPos);
     const sh = this.shake * 0.35 + vr * 0.012; cam.position.x += (Math.random() - 0.5) * sh; cam.position.y += (Math.random() - 0.5) * sh; cam.position.z += (Math.random() - 0.5) * sh;

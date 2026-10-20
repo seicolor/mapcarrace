@@ -337,6 +337,14 @@ export function makeCourse(loopPts, halfWidth = 7.5) {
     }
     return best;
   };
+  course.nearest = (x, z, maxD) => {
+    let best = Infinity, bi = -1; const r = Math.ceil(maxD / cell); const cx = Math.floor(x / cell), cz = Math.floor(z / cell);
+    for (let a = -r; a <= r; a++) for (let b = -r; b <= r; b++) {
+      const lst = grid.get(gk(cx + a, cz + b)); if (!lst) continue;
+      for (const i of lst) { const dx = pts[i][0] - x, dz = pts[i][1] - z; const d = dx * dx + dz * dz; if (d < best) { best = d; bi = i; } }
+    }
+    return bi < 0 || best > maxD * maxD ? null : { idx: bi, d: Math.sqrt(best) };
+  };
   // 窓付き最近点探索 → {idx, off(右が正), s}
   course.locate = (x, z, hint, win = 40) => {
     let bi = hint, bd = Infinity;

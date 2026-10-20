@@ -263,6 +263,7 @@ export class Car {
       else a -= input.brake * 9 * Math.max(0, 1 - Math.abs(vf) / 14);
     }
     a -= Math.sign(vf) * (0.8 + 0.0011 * vf * vf);
+    a -= 9.81 * (this.grade || 0) * 0.85; // 坂道
     if (input.handbrake) a -= Math.sign(vf) * 5.5;
     vf += a * dt; if (input.throttle === 0 && input.brake === 0 && Math.abs(vf) < 0.4) vf = 0;
     this.accelF = a;
@@ -327,7 +328,7 @@ export class Car {
 
   applyVisual(dt, time) {
     const m = this.model; const g = m.group;
-    g.position.set(this.x, 0.14, this.z); g.rotation.set(0, -this.heading, 0);
+    g.position.set(this.x, (this.y || 0) + 0.14, this.z); g.rotation.set(-Math.atan(this.bank || 0), -this.heading, Math.atan(this.grade || 0), 'YZX');
     // ピッチ・ロール
     const tp = -this.accelF * 0.0022, tr = THREE.MathUtils.clamp(this.yawRate * Math.abs(this.vf) * 0.0018, -0.06, 0.06) + this.vr * 0.004;
     this.pitch += (tp - this.pitch) * Math.min(1, dt * 8); this.roll += (tr - this.roll) * Math.min(1, dt * 8);
